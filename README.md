@@ -26,7 +26,7 @@ cargo upkeep audit
 cargo upkeep deps
 cargo upkeep quality
 cargo upkeep unused
-cargo upkeep unsafe
+cargo upkeep unsafe-code
 cargo upkeep tree
 ```
 

@@ -1,35 +1,39 @@
 //! Command dispatch and handlers.
 
+mod detect;
+
 use anyhow::Result;
 
 use crate::cli::UpkeepCommand;
 
-pub async fn handle(command: UpkeepCommand) -> Result<()> {
+pub async fn handle(command: UpkeepCommand, json: bool) -> Result<()> {
     match command {
-        UpkeepCommand::Detect => {
-            tracing::info!("detect not implemented");
-        }
+        UpkeepCommand::Detect => detect::run(json).await,
         UpkeepCommand::Audit => {
             tracing::info!("audit not implemented");
+            Ok(())
         }
         UpkeepCommand::Deps => {
             tracing::info!("deps not implemented");
+            Ok(())
         }
         UpkeepCommand::Quality => {
             tracing::info!("quality not implemented");
+            Ok(())
         }
         UpkeepCommand::Unused => {
             tracing::info!("unused not implemented");
+            Ok(())
         }
-        UpkeepCommand::Unsafe => {
-            tracing::info!("unsafe not implemented");
+        UpkeepCommand::UnsafeCode => {
+            tracing::info!("unsafe-code not implemented");
+            Ok(())
         }
         UpkeepCommand::Tree => {
             tracing::info!("tree not implemented");
+            Ok(())
         }
     }
-
-    Ok(())
 }
 
 #[cfg(test)]
@@ -45,12 +49,12 @@ mod tests {
             UpkeepCommand::Deps,
             UpkeepCommand::Quality,
             UpkeepCommand::Unused,
-            UpkeepCommand::Unsafe,
+            UpkeepCommand::UnsafeCode,
             UpkeepCommand::Tree,
         ];
 
         for command in commands {
-            handle(command).await.unwrap();
+            handle(command, false).await.unwrap();
         }
     }
 }

@@ -8,13 +8,21 @@ use clap::Parser;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let cli = cli::CargoCli::parse();
-    match cli.command {
-        cli::CargoCommand::Upkeep(upkeep) => {
-            cli::init_logging(upkeep.verbose, upkeep.log_level.as_deref())?;
-            cli::commands::handle(upkeep.command).await
-        }
-    }
+    let cli = cli::Cli::parse();
+    cli::init_logging(cli.verbose, cli.log_level.as_deref())?;
+
+    let command = match cli.command {
+        cli::Command::Upkeep(command) => command,
+        cli::Command::Detect => cli::UpkeepCommand::Detect,
+        cli::Command::Audit => cli::UpkeepCommand::Audit,
+        cli::Command::Deps => cli::UpkeepCommand::Deps,
+        cli::Command::Quality => cli::UpkeepCommand::Quality,
+        cli::Command::Unused => cli::UpkeepCommand::Unused,
+        cli::Command::UnsafeCode => cli::UpkeepCommand::UnsafeCode,
+        cli::Command::Tree => cli::UpkeepCommand::Tree,
+    };
+
+    cli::commands::handle(command, cli.json).await
 }
 
 #[cfg(test)]
