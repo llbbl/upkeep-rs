@@ -1,5 +1,6 @@
 //! Command dispatch and handlers.
 
+mod deps;
 mod detect;
 
 use anyhow::Result;
@@ -13,10 +14,7 @@ pub async fn handle(command: UpkeepCommand, json: bool) -> Result<()> {
             tracing::info!("audit not implemented");
             Ok(())
         }
-        UpkeepCommand::Deps => {
-            tracing::info!("deps not implemented");
-            Ok(())
-        }
+        UpkeepCommand::Deps { security } => deps::run(json, security).await,
         UpkeepCommand::Quality => {
             tracing::info!("quality not implemented");
             Ok(())
@@ -46,7 +44,7 @@ mod tests {
         let commands = [
             UpkeepCommand::Detect,
             UpkeepCommand::Audit,
-            UpkeepCommand::Deps,
+            UpkeepCommand::Deps { security: false },
             UpkeepCommand::Quality,
             UpkeepCommand::Unused,
             UpkeepCommand::UnsafeCode,

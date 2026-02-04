@@ -30,7 +30,10 @@ pub enum Command {
     Upkeep(UpkeepCommand),
     Detect,
     Audit,
-    Deps,
+    Deps {
+        #[arg(long)]
+        security: bool,
+    },
     Quality,
     Unused,
     #[command(name = "unsafe-code", alias = "unsafe")]
@@ -42,7 +45,10 @@ pub enum Command {
 pub enum UpkeepCommand {
     Detect,
     Audit,
-    Deps,
+    Deps {
+        #[arg(long)]
+        security: bool,
+    },
     Quality,
     Unused,
     #[command(name = "unsafe-code", alias = "unsafe")]

@@ -93,7 +93,8 @@ fn detect_outputs_workspace_true_for_virtual_workspace() {
     let temp_dir = tempfile::tempdir().expect("temp dir");
     let root = temp_dir.path();
 
-    fs::create_dir_all(root.join("crates").join("single-crate").join("src")).expect("create single-crate");
+    fs::create_dir_all(root.join("crates").join("single-crate").join("src"))
+        .expect("create single-crate");
 
     // Virtual workspace: has [workspace] but no [package] section
     fs::write(

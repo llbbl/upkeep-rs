@@ -28,6 +28,11 @@ pub struct DepsOutput {
     pub minor: usize,
     pub patch: usize,
     pub packages: Vec<OutdatedPackage>,
+    pub skipped: usize,
+    pub skipped_packages: Vec<SkippedDependency>,
+    pub workspace: bool,
+    pub members: Vec<String>,
+    pub skipped_members: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -63,9 +68,23 @@ pub struct MetricScore {
 #[derive(Debug, Serialize)]
 pub struct OutdatedPackage {
     pub name: String,
+    pub alias: Option<String>,
     pub current: String,
     pub latest: String,
+    pub required: String,
     pub update_type: UpdateType,
+    pub dependency_type: DependencyType,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SkippedDependency {
+    pub name: String,
+    pub alias: Option<String>,
+    pub required: String,
+    pub reason: SkipReason,
+    pub dependency_type: DependencyType,
+    pub source: Option<String>,
+    pub target: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -98,6 +117,24 @@ pub enum UpdateType {
     Major,
     Minor,
     Patch,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DependencyType {
+    Normal,
+    Dev,
+    Build,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SkipReason {
+    NonRegistry,
+    MissingResolve,
+    OptionalNotActivated,
+    TargetSpecific,
+    RegistryMetadataMissing,
 }
 
 #[derive(Debug, Serialize)]
@@ -192,6 +229,60 @@ impl fmt::Display for DepsOutput {
         writeln!(f, "Major: {}", self.major)?;
         writeln!(f, "Minor: {}", self.minor)?;
         writeln!(f, "Patch: {}", self.patch)?;
+        writeln!(f, "Skipped: {}", self.skipped)?;
+        writeln!(f, "Workspace: {}", self.workspace)?;
+        if self.workspace {
+            let members = if self.members.is_empty() {
+                "none".to_string()
+            } else {
+                self.members.join(", ")
+            };
+            writeln!(f, "Members: {}", members)?;
+            if !self.skipped_members.is_empty() {
+                writeln!(f, "Skipped members: {}", self.skipped_members.join(", "))?;
+            }
+        }
+        if self.packages.is_empty() {
+            writeln!(f, "Outdated packages: none")?;
+        } else {
+            writeln!(f, "Outdated packages:")?;
+            for package in &self.packages {
+                let display_name = match package.alias.as_deref() {
+                    Some(alias) => format!("{} ({})", alias, package.name),
+                    None => package.name.clone(),
+                };
+                writeln!(
+                    f,
+                    "- {} ({}) current {} latest {} required {}",
+                    display_name,
+                    package.dependency_type,
+                    package.current,
+                    package.latest,
+                    package.required
+                )?;
+            }
+        }
+        if !self.skipped_packages.is_empty() {
+            writeln!(f, "Skipped dependencies:")?;
+            for skipped in &self.skipped_packages {
+                let source = skipped.source.as_deref().unwrap_or("unknown");
+                let target = skipped.target.as_deref().unwrap_or("none");
+                let display_name = match skipped.alias.as_deref() {
+                    Some(alias) => format!("{} ({})", alias, skipped.name),
+                    None => skipped.name.clone(),
+                };
+                writeln!(
+                    f,
+                    "- {} ({}, type {}, required {}, source {}, target {})",
+                    display_name,
+                    skipped.reason,
+                    skipped.dependency_type,
+                    skipped.required,
+                    source,
+                    target
+                )?;
+            }
+        }
         Ok(())
     }
 }
@@ -233,6 +324,30 @@ impl fmt::Display for UpdateType {
             UpdateType::Major => "major",
             UpdateType::Minor => "minor",
             UpdateType::Patch => "patch",
+        };
+        write!(f, "{label}")
+    }
+}
+
+impl fmt::Display for DependencyType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let label = match self {
+            DependencyType::Normal => "normal",
+            DependencyType::Dev => "dev",
+            DependencyType::Build => "build",
+        };
+        write!(f, "{label}")
+    }
+}
+
+impl fmt::Display for SkipReason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let label = match self {
+            SkipReason::NonRegistry => "non_registry",
+            SkipReason::MissingResolve => "missing_resolve",
+            SkipReason::OptionalNotActivated => "optional_not_activated",
+            SkipReason::TargetSpecific => "target_specific",
+            SkipReason::RegistryMetadataMissing => "registry_metadata_missing",
         };
         write!(f, "{label}")
     }

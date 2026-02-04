@@ -15,7 +15,7 @@ async fn main() -> Result<()> {
         cli::Command::Upkeep(command) => command,
         cli::Command::Detect => cli::UpkeepCommand::Detect,
         cli::Command::Audit => cli::UpkeepCommand::Audit,
-        cli::Command::Deps => cli::UpkeepCommand::Deps,
+        cli::Command::Deps { security } => cli::UpkeepCommand::Deps { security },
         cli::Command::Quality => cli::UpkeepCommand::Quality,
         cli::Command::Unused => cli::UpkeepCommand::Unused,
         cli::Command::UnsafeCode => cli::UpkeepCommand::UnsafeCode,
