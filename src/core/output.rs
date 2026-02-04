@@ -3,6 +3,7 @@
 #![allow(dead_code)]
 
 use serde::Serialize;
+use std::collections::HashMap;
 use std::fmt;
 
 #[derive(Debug, Serialize)]
@@ -63,6 +64,24 @@ pub struct MetricScore {
     pub name: String,
     pub score: f32,
     pub weight: f32,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ClippyOutput {
+    pub warnings: usize,
+    pub errors: usize,
+    pub warnings_by_lint: HashMap<String, usize>,
+    pub details: Vec<ClippyIssue>,
+    pub score: f32,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ClippyIssue {
+    pub lint: String,
+    pub level: String,
+    pub message: String,
+    pub file: Option<String>,
+    pub line: Option<u32>,
 }
 
 #[derive(Debug, Serialize)]

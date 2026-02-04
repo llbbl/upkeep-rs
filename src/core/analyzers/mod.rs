@@ -2,6 +2,7 @@
 
 pub mod audit;
 pub mod crates_io;
+pub mod clippy;
 
 #[cfg(test)]
 mod tests {
