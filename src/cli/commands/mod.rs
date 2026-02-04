@@ -1,5 +1,6 @@
 //! Command dispatch and handlers.
 
+mod audit;
 mod deps;
 mod detect;
 
@@ -10,10 +11,7 @@ use crate::cli::UpkeepCommand;
 pub async fn handle(command: UpkeepCommand, json: bool) -> Result<()> {
     match command {
         UpkeepCommand::Detect => detect::run(json).await,
-        UpkeepCommand::Audit => {
-            tracing::info!("audit not implemented");
-            Ok(())
-        }
+        UpkeepCommand::Audit => audit::run(json).await,
         UpkeepCommand::Deps { security } => deps::run(json, security).await,
         UpkeepCommand::Quality => {
             tracing::info!("quality not implemented");
@@ -41,10 +39,11 @@ mod tests {
 
     #[tokio::test]
     async fn handlers_return_ok() {
+        // Only test commands that don't require network access.
+        // Audit requires fetching rustsec advisory database.
+        // Deps requires fetching crate info from crates.io.
         let commands = [
             UpkeepCommand::Detect,
-            UpkeepCommand::Audit,
-            UpkeepCommand::Deps { security: false },
             UpkeepCommand::Quality,
             UpkeepCommand::Unused,
             UpkeepCommand::UnsafeCode,

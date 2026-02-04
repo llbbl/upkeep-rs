@@ -115,10 +115,10 @@ pub async fn run(json: bool, include_security: bool) -> Result<()> {
         {
             Some(version) => version.clone(),
             None => {
-                let reason = if dep.target.is_some() {
-                    SkipReason::TargetSpecific
-                } else if dep.optional {
+                let reason = if dep.optional {
                     SkipReason::OptionalNotActivated
+                } else if dep.target.is_some() {
+                    SkipReason::TargetSpecific
                 } else {
                     SkipReason::MissingResolve
                 };

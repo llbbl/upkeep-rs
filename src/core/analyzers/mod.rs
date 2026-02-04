@@ -1,5 +1,6 @@
 //! Analyzer implementations for project inspection.
 
+pub mod audit;
 pub mod crates_io;
 
 #[cfg(test)]

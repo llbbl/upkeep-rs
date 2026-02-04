@@ -90,6 +90,8 @@ pub struct SkippedDependency {
 #[derive(Debug, Serialize)]
 pub struct Vulnerability {
     pub package: String,
+    pub package_version: String,
+    pub advisory_id: String,
     pub severity: Severity,
     pub title: String,
     pub path: Vec<String>,
@@ -294,6 +296,50 @@ impl fmt::Display for AuditOutput {
         writeln!(f, "High: {}", self.summary.high)?;
         writeln!(f, "Moderate: {}", self.summary.moderate)?;
         writeln!(f, "Low: {}", self.summary.low)?;
+        if self.vulnerabilities.is_empty() {
+            writeln!(f, "Details: none")?;
+            return Ok(());
+        }
+
+        let mut advisory_width = "advisory_id".len();
+        let mut package_width = "package".len();
+        let mut version_width = "version".len();
+        let mut severity_width = "severity".len();
+
+        for vulnerability in &self.vulnerabilities {
+            advisory_width = advisory_width.max(vulnerability.advisory_id.len());
+            package_width = package_width.max(vulnerability.package.len());
+            version_width = version_width.max(vulnerability.package_version.len());
+            severity_width = severity_width.max(vulnerability.severity.to_string().len());
+        }
+
+        writeln!(f, "Details:")?;
+        writeln!(
+            f,
+            "{:<advisory_width$}  {:<package_width$}  {:<version_width$}  {:<severity_width$}",
+            "advisory_id",
+            "package",
+            "version",
+            "severity",
+            advisory_width = advisory_width,
+            package_width = package_width,
+            version_width = version_width,
+            severity_width = severity_width
+        )?;
+        for vulnerability in &self.vulnerabilities {
+            writeln!(
+                f,
+                "{:<advisory_width$}  {:<package_width$}  {:<version_width$}  {:<severity_width$}",
+                vulnerability.advisory_id,
+                vulnerability.package,
+                vulnerability.package_version,
+                vulnerability.severity,
+                advisory_width = advisory_width,
+                package_width = package_width,
+                version_width = version_width,
+                severity_width = severity_width
+            )?;
+        }
         Ok(())
     }
 }

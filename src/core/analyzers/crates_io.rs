@@ -1,7 +1,6 @@
 #![allow(dead_code)]
 
 use anyhow::{Context, Result};
-use crates_index::GitIndex;
 use reqwest::Client;
 use semver::Version;
 use serde::Deserialize;
@@ -19,7 +18,6 @@ pub struct VersionInfo {
 
 #[derive(Clone)]
 pub struct CratesIoClient {
-    index: Arc<Mutex<GitIndex>>,
     http: Client,
     cache: Arc<Mutex<HashMap<String, VersionInfo>>>,
     limiter: Arc<Semaphore>,
@@ -27,13 +25,12 @@ pub struct CratesIoClient {
 
 impl CratesIoClient {
     pub fn new() -> Result<Self> {
-        let index = GitIndex::new_cargo_default()?;
         let http = Client::builder().user_agent("cargo-upkeep").build()?;
 
         Ok(Self {
-            index: Arc::new(Mutex::new(index)),
             http,
             cache: Arc::new(Mutex::new(HashMap::new())),
+            // crates.io rate limit: 1 request per second
             limiter: Arc::new(Semaphore::new(1)),
         })
     }
@@ -58,72 +55,13 @@ impl CratesIoClient {
         }
 
         for name in pending {
-            let info = self.fetch_one(&name, allow_prerelease).await?;
+            let info = self.fetch_from_api(&name, allow_prerelease).await?;
             results.insert(name.clone(), info.clone());
             let mut cache = self.cache.lock().await;
             cache.insert(name, info);
         }
 
         Ok(results)
-    }
-
-    async fn fetch_one(&self, name: &str, allow_prerelease: bool) -> Result<VersionInfo> {
-        if let Some(info) = self.fetch_from_index(name, allow_prerelease).await? {
-            return Ok(info);
-        }
-
-        self.fetch_from_api(name, allow_prerelease).await
-    }
-
-    async fn fetch_from_index(
-        &self,
-        name: &str,
-        allow_prerelease: bool,
-    ) -> Result<Option<VersionInfo>> {
-        let index = self.index.lock().await;
-        let krate = match index.crate_(name) {
-            Some(krate) => krate,
-            None => return Ok(None),
-        };
-
-        let mut latest: Option<Version> = None;
-        let mut latest_stable: Option<Version> = None;
-
-        for version in krate.versions() {
-            if version.is_yanked() {
-                continue;
-            }
-
-            let parsed = match Version::parse(version.version()) {
-                Ok(parsed) => parsed,
-                Err(_) => continue,
-            };
-
-            if allow_prerelease && latest.as_ref().map_or(true, |current| parsed > *current) {
-                latest = Some(parsed.clone());
-            }
-
-            if parsed.pre.is_empty()
-                && latest_stable
-                    .as_ref()
-                    .map_or(true, |current| parsed > *current)
-            {
-                latest_stable = Some(parsed);
-            }
-        }
-
-        let latest = latest.map(|v| v.to_string());
-        let latest_stable = latest_stable.map(|v| v.to_string());
-
-        Ok(Some(VersionInfo {
-            name: name.to_string(),
-            latest: if allow_prerelease {
-                latest
-            } else {
-                latest_stable.clone()
-            },
-            latest_stable,
-        }))
     }
 
     async fn fetch_from_api(&self, name: &str, allow_prerelease: bool) -> Result<VersionInfo> {
@@ -141,6 +79,8 @@ impl CratesIoClient {
             .json()
             .await
             .with_context(|| format!("failed to parse JSON response for {name}"))?;
+
+        // Rate limit: wait 1 second between requests
         sleep(Duration::from_secs(1)).await;
 
         let mut latest = payload.krate.max_version;
