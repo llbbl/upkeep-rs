@@ -1,0 +1,28 @@
+[package]
+name = "cargo-upkeep"
+version = "0.1.0"
+edition = "2021"
+description = "Unified Rust project maintenance CLI"
+repository = "https://github.com/llbbl/cargo-upkeep"
+homepage = "https://github.com/llbbl/cargo-upkeep"
+documentation = "https://docs.rs/cargo-upkeep"
+keywords = ["cargo", "dependencies", "security", "maintenance", "audit"]
+categories = ["development-tools::cargo-plugins", "command-line-utilities"]
+readme = "README.md"
+license = "MIT"
+rust-version = "1.70"
+
+[[bin]]
+name = "cargo-upkeep"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0"
+clap = { version = "4.5", features = ["derive"] }
+tokio = { version = "1.0", features = ["rt-multi-thread", "macros"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+assert_cmd = "2.0"
+predicates = "3.0"

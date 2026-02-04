@@ -10,9 +10,7 @@ AGENTS.md
 GEMINI.md
 CLAUDE.md
 
-
 docs/
-
 
 # Environment files
 .env
@@ -29,3 +27,7 @@ docs/
 # OS files
 .DS_Store
 Thumbs.db
+
+# Rust build artifacts
+/target
+**/*.rs.bk
