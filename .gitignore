@@ -1,0 +1,31 @@
+# LLM dirs
+.claude
+.cursor
+.openai
+.gemini
+.agent
+
+# LLM symlinks (point to CLAUDE.md)
+AGENTS.md
+GEMINI.md
+CLAUDE.md
+
+
+docs/
+
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# IDE/Editor
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
