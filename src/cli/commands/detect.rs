@@ -28,15 +28,7 @@ pub async fn run(json: bool) -> Result<()> {
                 targets,
             )
         } else {
-            (
-                None,
-                None,
-                None,
-                None,
-                0,
-                Vec::new(),
-                Vec::new(),
-            )
+            (None, None, None, None, 0, Vec::new(), Vec::new())
         };
 
     // A workspace exists if:
@@ -128,7 +120,10 @@ fn has_workflows(dir: &Path) -> bool {
     match std::fs::read_dir(dir) {
         Ok(entries) => entries.flatten().any(|entry| {
             let path = entry.path();
-            matches!(path.extension().and_then(|ext| ext.to_str()), Some("yml") | Some("yaml"))
+            matches!(
+                path.extension().and_then(|ext| ext.to_str()),
+                Some("yml") | Some("yaml")
+            )
         }),
         Err(_) => false,
     }
