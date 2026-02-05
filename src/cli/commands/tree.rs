@@ -56,7 +56,7 @@ pub async fn run(json: bool, args: TreeArgs) -> Result<()> {
     let mut versions_by_name: HashMap<String, HashSet<String>> = HashMap::new();
     for package in &metadata.packages {
         versions_by_name
-            .entry(package.name.clone())
+            .entry(package.name.to_string())
             .or_default()
             .insert(package.version.to_string());
         packages_by_id.insert(package.id.clone(), package);
@@ -71,7 +71,8 @@ pub async fn run(json: bool, args: TreeArgs) -> Result<()> {
     let mut forward_graph: HashMap<PackageId, Vec<Edge>> = HashMap::new();
 
     for node in &resolve.nodes {
-        features_by_id.insert(node.id.clone(), node.features.clone());
+        let features: Vec<String> = node.features.iter().map(ToString::to_string).collect();
+        features_by_id.insert(node.id.clone(), features);
         for dep in &node.deps {
             if args.no_dev && !includes_non_dev(dep) {
                 continue;
@@ -249,9 +250,9 @@ fn build_node(
         )
     })?;
 
-    let duplicate = ctx.duplicate_names.contains(&package.name);
+    let duplicate = ctx.duplicate_names.contains(package.name.as_str());
     let mut node = TreeNode {
-        name: package.name.clone(),
+        name: package.name.to_string(),
         version: package.version.to_string(),
         package_id: package.id.to_string(),
         features: if ctx.args.features {
