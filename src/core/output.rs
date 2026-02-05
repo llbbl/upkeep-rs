@@ -898,4 +898,293 @@ mod tests {
             Value::String("Security".into())
         );
     }
+
+    #[test]
+    fn display_detect_output_with_defaults() {
+        let output = DetectOutput {
+            edition: None,
+            msrv: None,
+            workspace: false,
+            members: Vec::new(),
+            package: None,
+            version: None,
+            dependencies: 0,
+            features: Vec::new(),
+            targets: Vec::new(),
+            tooling: Vec::new(),
+            ci: Vec::new(),
+        };
+
+        let text = format!("{output}");
+        assert!(text.contains("Package: unknown"));
+        assert!(text.contains("Version: unknown"));
+        assert!(text.contains("Edition: unknown"));
+        assert!(text.contains("MSRV: unknown"));
+        assert!(text.contains("Workspace: false"));
+        assert!(text.contains("Members: none"));
+        assert!(text.contains("Features: none"));
+        assert!(text.contains("Targets: none"));
+        assert!(text.contains("Tooling: none"));
+        assert!(text.contains("CI: none"));
+    }
+
+    #[test]
+    fn display_detect_output_with_values() {
+        let output = DetectOutput {
+            edition: Some("2021".to_string()),
+            msrv: Some("1.70".to_string()),
+            workspace: true,
+            members: vec!["core".to_string()],
+            package: Some("upkeep".to_string()),
+            version: Some("0.1.0".to_string()),
+            dependencies: 3,
+            features: vec!["default".to_string()],
+            targets: vec!["x86_64-apple-darwin".to_string()],
+            tooling: vec!["clippy".to_string()],
+            ci: vec!["github".to_string()],
+        };
+
+        let text = format!("{output}");
+        assert!(text.contains("Package: upkeep"));
+        assert!(text.contains("Version: 0.1.0"));
+        assert!(text.contains("Edition: 2021"));
+        assert!(text.contains("MSRV: 1.70"));
+        assert!(text.contains("Workspace: true"));
+        assert!(text.contains("Members: core"));
+        assert!(text.contains("Dependencies: 3"));
+        assert!(text.contains("Features: default"));
+        assert!(text.contains("Targets: x86_64-apple-darwin"));
+        assert!(text.contains("Tooling: clippy"));
+        assert!(text.contains("CI: github"));
+    }
+
+    #[test]
+    fn display_deps_output_full_sections() {
+        let output = DepsOutput {
+            total: 2,
+            outdated: 1,
+            major: 1,
+            minor: 0,
+            patch: 0,
+            packages: vec![OutdatedPackage {
+                name: "serde".to_string(),
+                alias: Some("serde_renamed".to_string()),
+                current: "1.0.0".to_string(),
+                latest: "1.0.1".to_string(),
+                required: "^1.0".to_string(),
+                update_type: UpdateType::Patch,
+                dependency_type: DependencyType::Normal,
+            }],
+            skipped: 1,
+            skipped_packages: vec![SkippedDependency {
+                name: "tokio".to_string(),
+                alias: None,
+                required: "^1".to_string(),
+                reason: SkipReason::NonRegistry,
+                dependency_type: DependencyType::Dev,
+                source: None,
+                target: None,
+            }],
+            warnings: vec!["registry unavailable".to_string()],
+            security: Some(DepsSecurityOutput {
+                summary: AuditSummary {
+                    critical: 0,
+                    high: 1,
+                    moderate: 0,
+                    low: 0,
+                    total: 1,
+                },
+                packages: vec![DepsSecurityPackage {
+                    name: "serde".to_string(),
+                    alias: None,
+                    current: "1.0.0".to_string(),
+                    dependency_type: DependencyType::Normal,
+                    vulnerabilities: vec![DepsSecurityVulnerability {
+                        advisory_id: "RUSTSEC-0000-0000".to_string(),
+                        severity: Severity::High,
+                        title: "Example".to_string(),
+                        fix_available: true,
+                    }],
+                }],
+            }),
+            workspace: true,
+            members: vec!["core".to_string()],
+            skipped_members: vec!["legacy".to_string()],
+        };
+
+        let text = format!("{output}");
+        assert!(text.contains("Warnings: registry unavailable"));
+        assert!(text.contains("Security: 1 vulnerabilities"));
+        assert!(text.contains("Vulnerable dependencies:"));
+        assert!(text.contains("serde (normal) current 1.0.0"));
+        assert!(text.contains("RUSTSEC-0000-0000"));
+        assert!(text.contains("Workspace: true"));
+        assert!(text.contains("Members: core"));
+        assert!(text.contains("Skipped members: legacy"));
+        assert!(text.contains("Outdated packages:"));
+        assert!(text.contains("serde_renamed (serde)"));
+        assert!(text.contains("Skipped dependencies:"));
+        assert!(text.contains("tokio"));
+    }
+
+    #[test]
+    fn display_deps_output_empty_sections() {
+        let output = DepsOutput {
+            total: 0,
+            outdated: 0,
+            major: 0,
+            minor: 0,
+            patch: 0,
+            packages: Vec::new(),
+            skipped: 0,
+            skipped_packages: Vec::new(),
+            warnings: Vec::new(),
+            security: None,
+            workspace: false,
+            members: Vec::new(),
+            skipped_members: Vec::new(),
+        };
+
+        let text = format!("{output}");
+        assert!(text.contains("Outdated packages: none"));
+        assert!(!text.contains("Warnings:"));
+        assert!(!text.contains("Security:"));
+        assert!(!text.contains("Skipped dependencies:"));
+    }
+
+    #[test]
+    fn display_unused_output_variants() {
+        let empty = UnusedOutput {
+            unused: Vec::new(),
+            possibly_unused: Vec::new(),
+        };
+        let text = format!("{empty}");
+        assert!(text.contains("Unused details: none"));
+        assert!(text.contains("Possibly unused details: none"));
+
+        let populated = UnusedOutput {
+            unused: vec![UnusedDep {
+                name: "tokio".to_string(),
+                dependency_type: DependencyType::Dev,
+                confidence: Confidence::High,
+            }],
+            possibly_unused: vec!["serde".to_string()],
+        };
+        let text = format!("{populated}");
+        assert!(text.contains("Unused details:"));
+        assert!(text.contains("tokio (dev, confidence high)"));
+        assert!(text.contains("Possibly unused details:"));
+        assert!(text.contains("- serde"));
+    }
+
+    #[test]
+    fn display_unsafe_output_variants() {
+        let empty = UnsafeOutput {
+            summary: UnsafeSummary {
+                packages: 0,
+                unsafe_functions: 0,
+                unsafe_impls: 0,
+                unsafe_traits: 0,
+                unsafe_blocks: 0,
+                unsafe_expressions: 0,
+                total_unsafe: 0,
+            },
+            packages: Vec::new(),
+        };
+        let text = format!("{empty}");
+        assert!(text.contains("Details: none"));
+
+        let populated = UnsafeOutput {
+            summary: UnsafeSummary {
+                packages: 1,
+                unsafe_functions: 1,
+                unsafe_impls: 0,
+                unsafe_traits: 0,
+                unsafe_blocks: 1,
+                unsafe_expressions: 0,
+                total_unsafe: 2,
+            },
+            packages: vec![UnsafePackage {
+                name: "ffi".to_string(),
+                version: "0.1.0".to_string(),
+                package_id: None,
+                unsafe_functions: 1,
+                unsafe_impls: 0,
+                unsafe_traits: 0,
+                unsafe_blocks: 1,
+                unsafe_expressions: 0,
+                total_unsafe: 2,
+            }],
+        };
+        let text = format!("{populated}");
+        assert!(text.contains("Details:"));
+        assert!(text.contains("ffi 0.1.0: unsafe 2"));
+    }
+
+    #[test]
+    fn display_audit_output_variants() {
+        let empty = AuditOutput {
+            vulnerabilities: Vec::new(),
+            summary: AuditSummary {
+                critical: 0,
+                high: 0,
+                moderate: 0,
+                low: 0,
+                total: 0,
+            },
+        };
+        let text = format!("{empty}");
+        assert!(text.contains("Details: none"));
+
+        let populated = AuditOutput {
+            vulnerabilities: vec![Vulnerability {
+                package: "serde".to_string(),
+                package_version: "1.0.0".to_string(),
+                advisory_id: "RUSTSEC-0000-0000".to_string(),
+                severity: Severity::High,
+                title: "Example".to_string(),
+                path: vec!["root".to_string()],
+                fix_available: false,
+            }],
+            summary: AuditSummary {
+                critical: 0,
+                high: 1,
+                moderate: 0,
+                low: 0,
+                total: 1,
+            },
+        };
+        let text = format!("{populated}");
+        assert!(text.contains("Details:"));
+        assert!(text.contains("advisory_id"));
+        assert!(text.contains("RUSTSEC-0000-0000"));
+    }
+
+    #[test]
+    fn display_quality_output_formats_score() {
+        let output = QualityOutput {
+            score: 92.54,
+            grade: Grade::A,
+            breakdown: Vec::new(),
+            recommendations: Vec::new(),
+        };
+        let text = format!("{output}");
+        assert!(text.contains("Score: 92.5"));
+        assert!(text.contains("Grade: A"));
+    }
+
+    #[test]
+    fn display_enum_labels() {
+        assert_eq!(format!("{}", Confidence::High), "high");
+        assert_eq!(format!("{}", Confidence::Medium), "medium");
+        assert_eq!(format!("{}", Confidence::Low), "low");
+        assert_eq!(format!("{}", Severity::Critical), "critical");
+        assert_eq!(format!("{}", UpdateType::Major), "major");
+        assert_eq!(format!("{}", DependencyType::Build), "build");
+        assert_eq!(
+            format!("{}", SkipReason::RegistryUnavailable),
+            "registry_unavailable"
+        );
+        assert_eq!(format!("{}", Grade::F), "F");
+    }
 }

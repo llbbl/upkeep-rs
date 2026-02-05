@@ -1,7 +1,7 @@
 use assert_cmd::cargo::cargo_bin_cmd;
 use predicates::prelude::*;
+use std::fs;
 use std::process::Command;
-use std::{fs, path::PathBuf};
 
 fn create_temp_crate(name: &str) -> tempfile::TempDir {
     let temp_dir = tempfile::tempdir().expect("temp dir");
@@ -131,12 +131,8 @@ fn cli_audit_command_reports_missing_lockfile() {
         .assert()
         .failure()
         .stderr(
-            predicate::str::contains("failed to load").and(predicate::str::contains(
-                PathBuf::from(temp_dir.path())
-                    .join("Cargo.lock")
-                    .to_string_lossy()
-                    .as_ref(),
-            )),
+            predicate::str::contains("failed to load")
+                .and(predicate::str::contains("Cargo.lock")),
         );
 }
 

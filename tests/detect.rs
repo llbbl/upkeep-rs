@@ -54,6 +54,10 @@ fn detect_outputs_human_readable_summary() {
         .stdout(
             predicate::str::contains("Workspace: false")
                 .and(predicate::str::contains("Package: detect-human"))
+                .and(predicate::str::contains("Edition: 2021"))
+                .and(predicate::str::contains("Version: 0.1.0"))
+                .and(predicate::str::contains("Features:"))
+                .and(predicate::str::contains("Targets:"))
                 .and(predicate::str::contains("Dependencies: 0")),
         );
 }

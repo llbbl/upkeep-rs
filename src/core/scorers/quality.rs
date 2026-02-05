@@ -232,9 +232,14 @@ fn recommendations_for(metrics: &[MetricScore]) -> Vec<String> {
 mod tests {
     use super::*;
 
+    /// Maximum allowed difference between actual and expected values in floating-point comparisons.
+    /// Set to 0.01 (1%) to account for floating-point arithmetic imprecision while still catching
+    /// meaningful deviations in score calculations.
+    const FLOAT_TOLERANCE: f32 = 0.01;
+
     fn assert_close(actual: f32, expected: f32) {
         assert!(
-            (actual - expected).abs() < 0.01,
+            (actual - expected).abs() < FLOAT_TOLERANCE,
             "expected {expected}, got {actual}"
         );
     }

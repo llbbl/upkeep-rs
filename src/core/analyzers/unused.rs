@@ -338,6 +338,33 @@ fn collect_possibly_unused(items: &[Value], possibly_unused: &mut Vec<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::future::Future;
+    use std::sync::{Arc, Mutex};
+
+    async fn run_machete_json_with<F, Fut>(
+        workspace_root: &Path,
+        run_tool: F,
+    ) -> Result<std::process::Output>
+    where
+        F: Fn(&[&str], &Path, &ExternalToolConfig<'_>) -> Fut,
+        Fut: Future<Output = Result<std::process::Output>>,
+    {
+        let output = run_tool(&["machete", "--json"], workspace_root, &MACHETE_CONFIG).await?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if is_unknown_flag(&stderr, "--json") {
+                let output = run_tool(&["machete"], workspace_root, &MACHETE_CONFIG).await?;
+                return handle_tool_output(output, &MACHETE_CONFIG, |stderr| {
+                    is_missing_subcommand(stderr, "machete")
+                });
+            }
+        }
+
+        handle_tool_output(output, &MACHETE_CONFIG, |stderr| {
+            is_missing_subcommand(stderr, "machete")
+        })
+    }
 
     #[test]
     fn parse_machete_output_handles_null() {
@@ -411,5 +438,90 @@ mod tests {
         assert_eq!(unused[2].name, "cc");
         assert_eq!(unused[2].dependency_type, DependencyType::Build);
         assert_eq!(possibly_unused, vec!["rand".to_string()]);
+    }
+
+    #[cfg(unix)]
+    fn exit_status(code: i32) -> std::process::ExitStatus {
+        use std::os::unix::process::ExitStatusExt;
+        std::process::ExitStatus::from_raw(code << 8)
+    }
+
+    #[cfg(windows)]
+    fn exit_status(code: i32) -> std::process::ExitStatus {
+        use std::os::windows::process::ExitStatusExt;
+        std::process::ExitStatus::from_raw(code as u32)
+    }
+
+    fn output_with(code: i32, stdout: &str, stderr: &str) -> std::process::Output {
+        std::process::Output {
+            status: exit_status(code),
+            stdout: stdout.as_bytes().to_vec(),
+            stderr: stderr.as_bytes().to_vec(),
+        }
+    }
+
+    #[tokio::test]
+    async fn run_machete_json_with_falls_back_on_unknown_flag() {
+        let outputs = Arc::new(Mutex::new(vec![
+            output_with(1, "", "error: Found argument '--json' which wasn't expected"),
+            output_with(
+                0,
+                "Unused dependencies:\n- serde\nPossibly unused dependencies:\n- rand\n",
+                "",
+            ),
+        ]));
+        let calls = Arc::new(Mutex::new(Vec::<Vec<String>>::new()));
+
+        let run_tool = |args: &[&str], _: &Path, _: &ExternalToolConfig<'_>| {
+            let outputs = Arc::clone(&outputs);
+            let calls = Arc::clone(&calls);
+            let args_vec = args.iter().map(|arg| (*arg).to_string()).collect();
+            async move {
+                calls.lock().unwrap().push(args_vec);
+                Ok(outputs.lock().unwrap().remove(0))
+            }
+        };
+
+        let output = run_machete_json_with(Path::new("."), &run_tool)
+            .await
+            .expect("output");
+        let stdout = String::from_utf8(output.stdout).expect("stdout");
+        let (unused, possibly_unused) = parse_machete_output(&stdout).expect("parse");
+
+        assert_eq!(unused.len(), 1);
+        assert_eq!(unused[0].name, "serde");
+        assert_eq!(unused[0].confidence, Confidence::Medium);
+        assert_eq!(possibly_unused, vec!["rand".to_string()]);
+        assert_eq!(
+            calls.lock().unwrap().as_slice(),
+            &[
+                vec!["machete".to_string(), "--json".to_string()],
+                vec!["machete".to_string()]
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn run_machete_json_with_missing_tool_returns_error() {
+        let outputs = Arc::new(Mutex::new(vec![output_with(
+            1,
+            "",
+            "error: no such subcommand: `machete`",
+        )]));
+
+        let run_tool = |args: &[&str], _: &Path, _: &ExternalToolConfig<'_>| {
+            let outputs = Arc::clone(&outputs);
+            let args_vec: Vec<String> = args.iter().map(|arg| (*arg).to_string()).collect();
+            async move {
+                assert_eq!(args_vec, vec!["machete".to_string(), "--json".to_string()]);
+                Ok(outputs.lock().unwrap().remove(0))
+            }
+        };
+
+        let err = run_machete_json_with(Path::new("."), &run_tool)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), ErrorCode::MissingTool);
+        assert!(err.to_string().contains("cargo-machete is not installed"));
     }
 }
