@@ -1,3 +1,10 @@
+---
+name: upkeep-rs-quality
+version: 0.1.3
+description: Generate Rust project health grade with improvement recommendations
+allowed-tools: Bash, Read, Grep, Glob, Edit
+---
+
 # /upkeep-rs-quality - Rust Project Health Report
 
 Trigger: User asks about project health or quality assessment.

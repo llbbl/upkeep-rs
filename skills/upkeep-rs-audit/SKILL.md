@@ -1,3 +1,10 @@
+---
+name: upkeep-rs-audit
+version: 0.1.3
+description: Scan for RustSec advisories and guide remediation
+allowed-tools: Bash, Read, Grep, Glob, Edit
+---
+
 # /upkeep-rs-audit - Rust Security Scanner
 
 Trigger: User asks about security vulnerabilities or wants to audit dependencies.

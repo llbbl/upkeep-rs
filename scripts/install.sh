@@ -4,10 +4,12 @@ set -euo pipefail
 REPO="llbbl/upkeep-rs"
 BIN_NAME="cargo-upkeep"
 VERSION="${VERSION:-latest}"
+SKILLS_DIR="${SKILLS_DIR:-$HOME/.claude/skills}"
+SKILLS=("upkeep-rs-deps" "upkeep-rs-audit" "upkeep-rs-quality")
 
 usage() {
   cat <<'EOF'
-Install cargo-upkeep binary.
+Install cargo-upkeep binary and Claude Code skills.
 
 Usage:
   curl -fsSL https://raw.githubusercontent.com/llbbl/upkeep-rs/main/scripts/install.sh | bash
@@ -15,9 +17,12 @@ Usage:
 Environment variables:
   VERSION      Release tag (default: latest)
   INSTALL_DIR  Install directory (default: prefers ~/.cargo/bin, then /usr/local/bin, then ~/.local/bin)
+  SKILLS_DIR   Claude Code skills directory (default: ~/.claude/skills)
+  SKIP_SKILLS  Set to 1 to skip skills installation
 
 Examples:
   VERSION=v0.1.0 INSTALL_DIR="$HOME/.local/bin" bash install.sh
+  SKIP_SKILLS=1 bash install.sh  # Binary only
 EOF
 }
 
@@ -158,4 +163,27 @@ mv "$tmp_dir/$BIN_NAME" "$install_dir/$BIN_NAME" || fail "failed to install bina
 printf 'Installed to %s/%s\n' "$install_dir" "$BIN_NAME"
 "$install_dir/$BIN_NAME" --version || fail "installed binary failed to run"
 
-printf 'Done. Ensure %s is on your PATH.\n' "$install_dir"
+# Install Claude Code skills
+if [[ "${SKIP_SKILLS:-}" != "1" ]]; then
+  printf '\nInstalling Claude Code skills to %s...\n' "$SKILLS_DIR"
+
+  skills_base_url="https://raw.githubusercontent.com/${REPO}/main/skills"
+
+  for skill in "${SKILLS[@]}"; do
+    skill_dir="$SKILLS_DIR/$skill"
+    mkdir -p "$skill_dir"
+
+    printf '  Installing %s...\n' "$skill"
+    curl -fsSL "$skills_base_url/$skill/SKILL.md" -o "$skill_dir/SKILL.md" || {
+      printf '  Warning: failed to download %s, skipping\n' "$skill"
+      continue
+    }
+  done
+
+  printf 'Skills installed:\n'
+  for skill in "${SKILLS[@]}"; do
+    printf '  /%s\n' "$skill"
+  done
+fi
+
+printf '\nDone. Ensure %s is on your PATH.\n' "$install_dir"

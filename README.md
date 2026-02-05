@@ -34,8 +34,16 @@ cargo binstall cargo-upkeep
 
 ### From install script
 
+Installs the binary and Claude Code skills:
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/llbbl/upkeep-rs/main/scripts/install.sh | bash
+```
+
+Binary only (skip skills):
+
+```bash
+SKIP_SKILLS=1 curl -fsSL https://raw.githubusercontent.com/llbbl/upkeep-rs/main/scripts/install.sh | bash
 ```
 
 ### From source (requires Rust 1.70+)

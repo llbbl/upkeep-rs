@@ -1,3 +1,10 @@
+---
+name: upkeep-rs-deps
+version: 0.1.3
+description: Upgrade Rust dependencies with risk assessment and verification
+allowed-tools: Bash, Read, Grep, Glob, Edit
+---
+
 # /upkeep-rs-deps - Rust Dependency Updater
 
 Trigger: User asks to update dependencies or check outdated crates.

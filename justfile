@@ -95,6 +95,10 @@ bump-version bump:
   esac
   NEW="$major.$minor.$patch"
   sed -i '' "s/^version = \"$CURRENT\"/version = \"$NEW\"/" Cargo.toml
+  # Update skill versions
+  for skill in skills/upkeep-rs-*/SKILL.md; do
+    sed -i '' "s/^version: .*/version: $NEW/" "$skill"
+  done
   echo "Bumped version: $CURRENT -> $NEW"
 
 # Commit version bump and create tag
@@ -102,7 +106,7 @@ commit-version:
   #!/usr/bin/env bash
   set -euo pipefail
   VERSION=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
-  git add Cargo.toml
+  git add Cargo.toml Cargo.lock skills/upkeep-rs-*/SKILL.md
   git commit -m "chore(release): bump version to v$VERSION"
   git tag "v$VERSION"
   echo "Created tag v$VERSION"
