@@ -17,7 +17,19 @@ pub async fn handle(command: UpkeepCommand, json: bool) -> Result<()> {
         UpkeepCommand::Detect => tokio::task::spawn_blocking(move || detect::run(json))
             .await
             .map_err(|err| {
-                UpkeepError::message(ErrorCode::TaskFailed, format!("detect task failed: {err}"))
+                // JoinError occurs when:
+                // 1. The task panicked (is_panic() returns true)
+                // 2. The task was cancelled (is_cancelled() returns true)
+                // Note: Testing JoinError paths is complex as it requires injecting panics
+                // into spawn_blocking tasks, which is not straightforward to do reliably.
+                let reason = if err.is_panic() {
+                    "task panicked"
+                } else if err.is_cancelled() {
+                    "task was cancelled"
+                } else {
+                    "task failed"
+                };
+                UpkeepError::message(ErrorCode::TaskFailed, format!("detect {reason}: {err}"))
             })?,
         UpkeepCommand::Audit => audit::run(json).await,
         UpkeepCommand::Deps { security } => deps::run(json, security).await,

@@ -123,7 +123,8 @@ pub fn init_logging(verbose: bool, log_level: Option<&str>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{Cli, Command, TreeArgs, UpkeepCommand};
-    use clap::Parser;
+    use clap::{error::ErrorKind, Parser};
+    use crate::core::error::ErrorCode;
 
     #[test]
     fn parses_upkeep_subcommand() {
@@ -180,5 +181,58 @@ mod tests {
             }
             _ => panic!("unexpected subcommand"),
         }
+    }
+
+    #[test]
+    fn parses_global_flags() {
+        let cli = Cli::try_parse_from([
+            "cargo-upkeep",
+            "--json",
+            "--verbose",
+            "--log-level",
+            "debug",
+            "detect",
+        ])
+        .unwrap();
+
+        assert!(cli.json);
+        assert!(cli.verbose);
+        assert_eq!(cli.log_level.as_deref(), Some("debug"));
+    }
+
+    #[test]
+    fn parses_unsafe_aliases() {
+        let cli = Cli::try_parse_from(["cargo-upkeep", "unsafe"]).unwrap();
+        assert!(matches!(cli.command, Command::UnsafeCode));
+
+        let cli = Cli::try_parse_from(["cargo-upkeep", "unsafe-code"]).unwrap();
+        assert!(matches!(cli.command, Command::UnsafeCode));
+    }
+
+    #[test]
+    fn missing_subcommand_returns_error() {
+        let err = Cli::try_parse_from(["cargo-upkeep"]).unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand);
+    }
+
+    #[test]
+    fn unknown_flag_returns_error() {
+        let err = Cli::try_parse_from(["cargo-upkeep", "--nope", "detect"]).unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::UnknownArgument);
+    }
+
+    #[test]
+    fn unknown_subcommand_returns_error() {
+        let err = Cli::try_parse_from(["cargo-upkeep", "DETECT"]).unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::InvalidSubcommand);
+    }
+
+    #[test]
+    fn init_logging_invalid_level_returns_error() {
+        let err = super::init_logging(false, Some("info=bogus")).unwrap_err();
+        assert_eq!(err.code(), ErrorCode::Config);
+        assert!(err
+            .to_string()
+            .contains("invalid log level filter: info=bogus"));
     }
 }
