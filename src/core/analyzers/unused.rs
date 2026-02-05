@@ -1,13 +1,19 @@
 use cargo_metadata::MetadataCommand;
 use serde_json::Value;
-use std::io;
 use std::path::Path;
 use std::path::PathBuf;
-use tokio::process::Command;
 
+use crate::core::analyzers::external_tool::{
+    handle_tool_output, is_missing_subcommand, is_unknown_flag, run_cargo_tool, ExternalToolConfig,
+};
 use crate::core::analyzers::util::describe_json_schema;
 use crate::core::error::{ErrorCode, Result, UpkeepError};
 use crate::core::output::{DependencyType, UnusedDep, UnusedOutput};
+
+const MACHETE_CONFIG: ExternalToolConfig<'static> = ExternalToolConfig {
+    tool_name: "machete",
+    install_hint: "cargo install cargo-machete",
+};
 
 pub async fn run_unused() -> Result<UnusedOutput> {
     let metadata = MetadataCommand::new().exec().map_err(|err| {
@@ -32,92 +38,26 @@ pub async fn run_unused() -> Result<UnusedOutput> {
 }
 
 async fn run_machete_json(workspace_root: &Path) -> Result<std::process::Output> {
-    let output = run_machete(&["machete", "--json"], workspace_root).await?;
+    let output = run_cargo_tool(&["machete", "--json"], workspace_root, &MACHETE_CONFIG).await?;
 
     // If the --json flag is not recognized, fall back to plain output
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        if is_unknown_json_flag(&stderr) {
+        if is_unknown_flag(&stderr, "--json") {
             return run_machete_plain(workspace_root).await;
         }
     }
 
-    handle_machete_output(output)
+    handle_tool_output(output, &MACHETE_CONFIG, |stderr| {
+        is_missing_subcommand(stderr, "machete")
+    })
 }
 
 async fn run_machete_plain(workspace_root: &Path) -> Result<std::process::Output> {
-    let output = run_machete(&["machete"], workspace_root).await?;
-    handle_machete_output(output)
-}
-
-/// Shared error handling for machete command output.
-///
-/// Returns `Ok(output)` if the command succeeded or produced stdout.
-/// Returns an appropriate error otherwise.
-fn handle_machete_output(output: std::process::Output) -> Result<std::process::Output> {
-    if output.status.success() {
-        return Ok(output);
-    }
-
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    if is_missing_machete(&stderr) {
-        return missing_machete_error();
-    }
-
-    // Some machete versions exit non-zero but still produce valid output
-    if !output.stdout.is_empty() {
-        return Ok(output);
-    }
-
-    let message = stderr.trim();
-    if message.is_empty() {
-        return Err(UpkeepError::message(
-            ErrorCode::ExternalCommand,
-            "cargo machete failed with no stderr output",
-        ));
-    }
-    Err(UpkeepError::message(
-        ErrorCode::ExternalCommand,
-        format!("cargo machete failed: {message}"),
-    ))
-}
-
-async fn run_machete(args: &[&str], workspace_root: &Path) -> Result<std::process::Output> {
-    Command::new("cargo")
-        .args(args)
-        .current_dir(workspace_root)
-        .output()
-        .await
-        .map_err(|err| match err.kind() {
-            io::ErrorKind::NotFound => UpkeepError::message(
-                ErrorCode::MissingTool,
-                "cargo is not installed or not on PATH",
-            ),
-            _ => UpkeepError::context(
-                ErrorCode::ExternalCommand,
-                "failed to execute cargo machete",
-                err,
-            ),
-        })
-}
-
-fn missing_machete_error() -> Result<std::process::Output> {
-    Err(UpkeepError::message(
-        ErrorCode::MissingTool,
-        "cargo-machete is not installed. Install it with `cargo install cargo-machete`.",
-    ))
-}
-
-fn is_missing_machete(stderr: &str) -> bool {
-    let lower = stderr.to_lowercase();
-    (lower.contains("no such subcommand") || lower.contains("unknown subcommand"))
-        && lower.contains("machete")
-}
-
-fn is_unknown_json_flag(stderr: &str) -> bool {
-    let lower = stderr.to_lowercase();
-    (lower.contains("unexpected argument") || lower.contains("found argument"))
-        && lower.contains("--json")
+    let output = run_cargo_tool(&["machete"], workspace_root, &MACHETE_CONFIG).await?;
+    handle_tool_output(output, &MACHETE_CONFIG, |stderr| {
+        is_missing_subcommand(stderr, "machete")
+    })
 }
 
 fn parse_machete_output(stdout: &str) -> Result<(Vec<UnusedDep>, Vec<String>)> {
@@ -244,6 +184,10 @@ fn collect_from_key(
     Ok(true)
 }
 
+/// Default confidence level for JSON-parsed dependencies.
+/// JSON output from machete is considered high confidence.
+const JSON_DEFAULT_CONFIDENCE: &str = "high";
+
 fn parse_dependency_array(
     items: &[Value],
     fallback_type: DependencyType,
@@ -254,7 +198,7 @@ fn parse_dependency_array(
             Value::String(name) => deps.push(UnusedDep {
                 name: name.clone(),
                 dependency_type: fallback_type,
-                confidence: "high".to_string(),
+                confidence: JSON_DEFAULT_CONFIDENCE.to_string(),
             }),
             Value::Object(obj) => {
                 let name = obj
@@ -271,10 +215,16 @@ fn parse_dependency_array(
                     .and_then(|v| v.as_str())
                     .and_then(parse_dependency_type)
                     .unwrap_or(fallback_type);
+                // Extract confidence from JSON if present, otherwise use default
+                let confidence = obj
+                    .get("confidence")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(JSON_DEFAULT_CONFIDENCE)
+                    .to_string();
                 deps.push(UnusedDep {
                     name,
                     dependency_type,
-                    confidence: "high".to_string(),
+                    confidence,
                 });
             }
             _ => {}
@@ -291,6 +241,10 @@ fn parse_dependency_type(kind: &str) -> Option<DependencyType> {
         _ => None,
     }
 }
+
+/// Confidence level for text-parsed dependencies.
+/// Text output parsing is less reliable than JSON, so we use medium confidence.
+const TEXT_CONFIDENCE: &str = "medium";
 
 fn parse_machete_text(stdout: &str) -> (Vec<UnusedDep>, Vec<String>) {
     let mut dependencies = Vec::new();
@@ -350,7 +304,7 @@ fn parse_machete_text(stdout: &str) -> (Vec<UnusedDep>, Vec<String>) {
         dependencies.push(UnusedDep {
             name,
             dependency_type,
-            confidence: "high".to_string(),
+            confidence: TEXT_CONFIDENCE.to_string(),
         });
     }
 

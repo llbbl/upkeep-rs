@@ -1,13 +1,19 @@
 use cargo_metadata::MetadataCommand;
 use serde_json::Value;
-use std::io;
 use std::path::Path;
 use std::path::PathBuf;
-use tokio::process::Command;
 
+use crate::core::analyzers::external_tool::{
+    handle_tool_output, is_missing_subcommand, is_unknown_flag, run_cargo_tool, ExternalToolConfig,
+};
 use crate::core::analyzers::util::describe_json_schema;
 use crate::core::error::{ErrorCode, Result, UpkeepError};
 use crate::core::output::{UnsafeOutput, UnsafePackage, UnsafeSummary};
+
+const GEIGER_CONFIG: ExternalToolConfig<'static> = ExternalToolConfig {
+    tool_name: "geiger",
+    install_hint: "cargo install cargo-geiger",
+};
 
 pub async fn run_unsafe() -> Result<UnsafeOutput> {
     let metadata = MetadataCommand::new().exec().map_err(|err| {
@@ -25,9 +31,9 @@ pub async fn run_unsafe() -> Result<UnsafeOutput> {
     })?;
     match parse_geiger_output(&stdout) {
         Ok(output) => Ok(output),
-        Err(err) => {
+        Err(parse_err) => {
             if output.status.success() {
-                return Err(err);
+                return Err(parse_err);
             }
 
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -39,7 +45,8 @@ pub async fn run_unsafe() -> Result<UnsafeOutput> {
                 stderr_message
             };
 
-            let mut message = format!("cargo geiger failed: stderr: {stderr_message}");
+            let mut message =
+                format!("cargo geiger failed: stderr: {stderr_message}; parse error: {parse_err}");
             if !stdout_message.is_empty() {
                 message.push_str(" stdout: ");
                 message.push_str(stdout_message);
@@ -51,92 +58,36 @@ pub async fn run_unsafe() -> Result<UnsafeOutput> {
 }
 
 async fn run_geiger_json(workspace_root: &Path) -> Result<std::process::Output> {
-    let output = run_geiger(&["geiger", "--output-format", "json"], workspace_root).await?;
+    let output = run_cargo_tool(
+        &["geiger", "--output-format", "json"],
+        workspace_root,
+        &GEIGER_CONFIG,
+    )
+    .await?;
 
     // If the output flag is not recognized, try the alternative flag
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        if is_unknown_output_flag(&stderr) {
+        if is_unknown_flag(&stderr, "--output-format") {
             return run_geiger_json_alt(workspace_root).await;
         }
     }
 
-    handle_geiger_output(output)
+    handle_tool_output(output, &GEIGER_CONFIG, |stderr| {
+        is_missing_subcommand(stderr, "geiger")
+    })
 }
 
 async fn run_geiger_json_alt(workspace_root: &Path) -> Result<std::process::Output> {
-    let output = run_geiger(&["geiger", "--format", "json"], workspace_root).await?;
-    handle_geiger_output(output)
-}
-
-/// Shared error handling for geiger command output.
-///
-/// Returns `Ok(output)` if the command succeeded or produced stdout.
-/// Returns an appropriate error otherwise.
-fn handle_geiger_output(output: std::process::Output) -> Result<std::process::Output> {
-    if output.status.success() {
-        return Ok(output);
-    }
-
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    if is_missing_geiger(&stderr) {
-        return missing_geiger_error();
-    }
-
-    // Some geiger versions exit non-zero but still produce valid output
-    if !output.stdout.is_empty() {
-        return Ok(output);
-    }
-
-    let message = stderr.trim();
-    if message.is_empty() {
-        return Err(UpkeepError::message(
-            ErrorCode::ExternalCommand,
-            "cargo geiger failed with no stderr output",
-        ));
-    }
-    Err(UpkeepError::message(
-        ErrorCode::ExternalCommand,
-        format!("cargo geiger failed: {message}"),
-    ))
-}
-
-async fn run_geiger(args: &[&str], workspace_root: &Path) -> Result<std::process::Output> {
-    Command::new("cargo")
-        .args(args)
-        .current_dir(workspace_root)
-        .output()
-        .await
-        .map_err(|err| match err.kind() {
-            io::ErrorKind::NotFound => UpkeepError::message(
-                ErrorCode::MissingTool,
-                "cargo is not installed or not on PATH",
-            ),
-            _ => UpkeepError::context(
-                ErrorCode::ExternalCommand,
-                "failed to execute cargo geiger",
-                err,
-            ),
-        })
-}
-
-fn missing_geiger_error() -> Result<std::process::Output> {
-    Err(UpkeepError::message(
-        ErrorCode::MissingTool,
-        "cargo-geiger is not installed. Install it with `cargo install cargo-geiger`.",
-    ))
-}
-
-fn is_missing_geiger(stderr: &str) -> bool {
-    let lower = stderr.to_lowercase();
-    (lower.contains("no such subcommand") || lower.contains("unknown subcommand"))
-        && lower.contains("geiger")
-}
-
-fn is_unknown_output_flag(stderr: &str) -> bool {
-    let lower = stderr.to_lowercase();
-    (lower.contains("unexpected argument") || lower.contains("found argument"))
-        && lower.contains("--output-format")
+    let output = run_cargo_tool(
+        &["geiger", "--format", "json"],
+        workspace_root,
+        &GEIGER_CONFIG,
+    )
+    .await?;
+    handle_tool_output(output, &GEIGER_CONFIG, |stderr| {
+        is_missing_subcommand(stderr, "geiger")
+    })
 }
 
 fn parse_geiger_output(stdout: &str) -> Result<UnsafeOutput> {
@@ -333,12 +284,16 @@ fn summarize(packages: &[UnsafePackage]) -> UnsafeSummary {
     };
 
     for package in packages {
-        summary.unsafe_functions += package.unsafe_functions;
-        summary.unsafe_impls += package.unsafe_impls;
-        summary.unsafe_traits += package.unsafe_traits;
-        summary.unsafe_blocks += package.unsafe_blocks;
-        summary.unsafe_expressions += package.unsafe_expressions;
-        summary.total_unsafe += package.total_unsafe;
+        summary.unsafe_functions = summary
+            .unsafe_functions
+            .saturating_add(package.unsafe_functions);
+        summary.unsafe_impls = summary.unsafe_impls.saturating_add(package.unsafe_impls);
+        summary.unsafe_traits = summary.unsafe_traits.saturating_add(package.unsafe_traits);
+        summary.unsafe_blocks = summary.unsafe_blocks.saturating_add(package.unsafe_blocks);
+        summary.unsafe_expressions = summary
+            .unsafe_expressions
+            .saturating_add(package.unsafe_expressions);
+        summary.total_unsafe = summary.total_unsafe.saturating_add(package.total_unsafe);
     }
 
     summary

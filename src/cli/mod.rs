@@ -56,7 +56,7 @@ pub enum UpkeepCommand {
     Tree(TreeArgs),
 }
 
-#[derive(Debug, Args, Clone)]
+#[derive(Debug, Args)]
 pub struct TreeArgs {
     #[arg(long)]
     pub depth: Option<usize>,

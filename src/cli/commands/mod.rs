@@ -3,6 +3,7 @@
 mod audit;
 mod deps;
 mod detect;
+mod quality;
 mod tree;
 mod unsafe_code;
 mod unused;
@@ -16,10 +17,7 @@ pub async fn handle(command: UpkeepCommand, json: bool) -> Result<()> {
         UpkeepCommand::Detect => detect::run(json).await,
         UpkeepCommand::Audit => audit::run(json).await,
         UpkeepCommand::Deps { security } => deps::run(json, security).await,
-        UpkeepCommand::Quality => {
-            tracing::info!("quality not implemented");
-            Ok(())
-        }
+        UpkeepCommand::Quality => quality::run(json).await,
         UpkeepCommand::Unused => unused::run(json).await,
         UpkeepCommand::UnsafeCode => unsafe_code::run(json).await,
         UpkeepCommand::Tree(args) => tree::run(json, args).await,

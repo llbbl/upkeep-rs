@@ -20,7 +20,7 @@ struct Edge {
 /// to avoid passing many arguments through recursive calls.
 struct TreeBuildContext<'a> {
     graph: &'a HashMap<PackageId, Vec<Edge>>,
-    packages_by_id: &'a HashMap<PackageId, Package>,
+    packages_by_id: &'a HashMap<PackageId, &'a Package>,
     features_by_id: &'a HashMap<PackageId, Vec<String>>,
     args: &'a TreeArgs,
     duplicate_names: &'a HashSet<String>,
@@ -31,7 +31,10 @@ struct TreeBuildContext<'a> {
 pub async fn run(json: bool, args: TreeArgs) -> Result<()> {
     let cwd = std::env::current_dir()
         .map(|p| p.display().to_string())
-        .unwrap_or_else(|_| "<unknown>".to_string());
+        .unwrap_or_else(|err| {
+            tracing::warn!("could not determine current directory: {err}");
+            "<unknown>".to_string()
+        });
 
     let metadata = MetadataCommand::new()
         .features(CargoOpt::AllFeatures)
@@ -47,14 +50,14 @@ pub async fn run(json: bool, args: TreeArgs) -> Result<()> {
         UpkeepError::message(ErrorCode::InvalidData, "metadata missing resolve data")
     })?;
 
-    let mut packages_by_id = HashMap::new();
+    let mut packages_by_id: HashMap<PackageId, &Package> = HashMap::new();
     let mut versions_by_name: HashMap<String, HashSet<String>> = HashMap::new();
     for package in &metadata.packages {
         versions_by_name
             .entry(package.name.clone())
             .or_default()
             .insert(package.version.to_string());
-        packages_by_id.insert(package.id.clone(), package.clone());
+        packages_by_id.insert(package.id.clone(), package);
     }
 
     let duplicate_names: HashSet<String> = versions_by_name
@@ -219,10 +222,15 @@ fn build_node(
 ) -> Result<Option<TreeNode>> {
     // Safety limit to prevent stack overflow on pathologically deep graphs
     if depth > MAX_TREE_DEPTH {
+        let package_name = ctx
+            .packages_by_id
+            .get(id)
+            .map(|p| p.name.as_str())
+            .unwrap_or("<unknown>");
         return Err(UpkeepError::message(
             ErrorCode::InvalidData,
             format!(
-                "dependency tree exceeds maximum depth of {MAX_TREE_DEPTH}; \
+                "dependency tree exceeds maximum depth of {MAX_TREE_DEPTH} at package '{package_name}'; \
                  possible circular dependency or extremely deep graph"
             ),
         ));
@@ -268,35 +276,41 @@ fn build_node(
     }
 
     // Track current path for cycle detection (checked in child loop below)
+    // Use a scope guard pattern to ensure path is always cleaned up, even on error
     ctx.path.insert(id.clone());
 
-    let mut children = ctx.graph.get(id).cloned().unwrap_or_default();
-    children.sort_by(|left, right| {
-        let left_name = ctx
-            .packages_by_id
-            .get(&left.id)
-            .map(|pkg| pkg.name.as_str())
-            .unwrap_or("~");
-        let right_name = ctx
-            .packages_by_id
-            .get(&right.id)
-            .map(|pkg| pkg.name.as_str())
-            .unwrap_or("~");
-        left_name.cmp(right_name)
-    });
+    let result = (|| -> Result<()> {
+        let mut children = ctx.graph.get(id).cloned().unwrap_or_default();
+        children.sort_by(|left, right| {
+            let left_name = ctx
+                .packages_by_id
+                .get(&left.id)
+                .map(|pkg| pkg.name.as_str())
+                .unwrap_or("~");
+            let right_name = ctx
+                .packages_by_id
+                .get(&right.id)
+                .map(|pkg| pkg.name.as_str())
+                .unwrap_or("~");
+            left_name.cmp(right_name)
+        });
 
-    for child in children {
-        if ctx.path.contains(&child.id) {
-            continue;
+        for child in children {
+            if ctx.path.contains(&child.id) {
+                continue;
+            }
+            if let Some(child_node) =
+                build_node(&child.id, depth + 1, child.is_dev, child.is_build, ctx)?
+            {
+                node.dependencies.push(child_node);
+            }
         }
-        if let Some(child_node) =
-            build_node(&child.id, depth + 1, child.is_dev, child.is_build, ctx)?
-        {
-            node.dependencies.push(child_node);
-        }
-    }
+        Ok(())
+    })();
 
+    // Always clean up path, even if an error occurred
     ctx.path.remove(id);
+    result?;
 
     if ctx.args.duplicates && !duplicate && depth > 0 && node.dependencies.is_empty() {
         return Ok(None);

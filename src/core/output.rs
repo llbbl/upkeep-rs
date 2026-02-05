@@ -31,6 +31,7 @@ pub struct DepsOutput {
     pub packages: Vec<OutdatedPackage>,
     pub skipped: usize,
     pub skipped_packages: Vec<SkippedDependency>,
+    pub warnings: Vec<String>,
     pub workspace: bool,
     pub members: Vec<String>,
     pub skipped_members: Vec<String>,
@@ -219,6 +220,7 @@ pub enum SkipReason {
     OptionalNotActivated,
     TargetSpecific,
     RegistryMetadataMissing,
+    RegistryUnavailable,
 }
 
 #[derive(Debug, Serialize)]
@@ -300,6 +302,9 @@ impl fmt::Display for DepsOutput {
         writeln!(f, "Minor: {}", self.minor)?;
         writeln!(f, "Patch: {}", self.patch)?;
         writeln!(f, "Skipped: {}", self.skipped)?;
+        if !self.warnings.is_empty() {
+            writeln!(f, "Warnings: {}", self.warnings.join("; "))?;
+        }
         writeln!(f, "Workspace: {}", self.workspace)?;
         if self.workspace {
             let members = if self.members.is_empty() {
@@ -528,6 +533,7 @@ impl fmt::Display for SkipReason {
             SkipReason::OptionalNotActivated => "optional_not_activated",
             SkipReason::TargetSpecific => "target_specific",
             SkipReason::RegistryMetadataMissing => "registry_metadata_missing",
+            SkipReason::RegistryUnavailable => "registry_unavailable",
         };
         write!(f, "{label}")
     }
@@ -548,7 +554,7 @@ impl fmt::Display for Grade {
 
 #[cfg(test)]
 mod tests {
-    use super::{print_json, Grade, QualityOutput};
+    use super::{Grade, QualityOutput};
 
     #[test]
     fn output_module_smoke() {
@@ -559,6 +565,9 @@ mod tests {
             recommendations: Vec::new(),
         };
 
-        print_json(&output).unwrap();
+        // Test that serialization succeeds without printing to stdout
+        let json = serde_json::to_string_pretty(&output).unwrap();
+        assert!(json.contains("\"score\": 92.5"));
+        assert!(json.contains("\"grade\": \"A\""));
     }
 }

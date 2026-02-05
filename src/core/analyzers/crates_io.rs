@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use reqwest::Client;
 use semver::Version;
 use serde::Deserialize;
@@ -11,8 +9,12 @@ use tokio::time::{sleep, Duration};
 use crate::core::error::{ErrorCode, Result, UpkeepError};
 #[derive(Debug, Clone)]
 pub struct VersionInfo {
+    /// The crate name (kept for debugging and future use).
+    #[allow(dead_code)]
     pub name: String,
     pub latest: Option<String>,
+    /// The latest stable version (kept for future prerelease filtering).
+    #[allow(dead_code)]
     pub latest_stable: Option<String>,
 }
 
@@ -66,6 +68,11 @@ impl CratesIoClient {
 
     async fn fetch_from_api(&self, name: &str, allow_prerelease: bool) -> Result<VersionInfo> {
         let _permit = self.limiter.acquire().await?;
+
+        // Rate limit: wait 1 second before making the request
+        // This ensures we don't exceed crates.io rate limits (1 req/sec)
+        sleep(Duration::from_secs(1)).await;
+
         let url = format!("https://crates.io/api/v1/crates/{name}");
         let response = self.http.get(&url).send().await.map_err(|err| {
             UpkeepError::context(
@@ -92,9 +99,6 @@ impl CratesIoClient {
                     err,
                 )
             })?;
-
-        // Rate limit: wait 1 second between requests
-        sleep(Duration::from_secs(1)).await;
 
         let mut latest = payload.krate.max_version;
         let mut latest_stable = payload.krate.max_stable_version;
