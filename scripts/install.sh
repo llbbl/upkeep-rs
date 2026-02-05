@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO="llbbl/cargo-upkeep"
+REPO="llbbl/upkeep-rs"
 BIN_NAME="cargo-upkeep"
 VERSION="${VERSION:-latest}"
 
@@ -10,7 +10,7 @@ usage() {
 Install cargo-upkeep binary.
 
 Usage:
-  curl -fsSL https://raw.githubusercontent.com/llbbl/cargo-upkeep/main/scripts/install.sh | bash
+  curl -fsSL https://raw.githubusercontent.com/llbbl/upkeep-rs/main/scripts/install.sh | bash
 
 Environment variables:
   VERSION      Release tag (default: latest)

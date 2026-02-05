@@ -1,10 +1,10 @@
 [package]
 name = "cargo-upkeep"
-version = "0.1.0"
+version = "0.0.1"
 edition = "2021"
 description = "Unified Rust project maintenance CLI (cargo subcommand)"
-repository = "https://github.com/llbbl/cargo-upkeep"
-homepage = "https://github.com/llbbl/cargo-upkeep"
+repository = "https://github.com/llbbl/upkeep-rs"
+homepage = "https://github.com/llbbl/upkeep-rs"
 documentation = "https://docs.rs/cargo-upkeep"
 keywords = ["cargo", "cargo-subcommand", "dependencies", "security", "maintenance"]
 categories = ["development-tools::cargo-plugins", "command-line-utilities"]

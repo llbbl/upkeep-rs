@@ -1,8 +1,7 @@
 # cargo-upkeep
 
-![CI](https://github.com/llbbl/cargo-upkeep/actions/workflows/ci.yml/badge.svg)
+![CI](https://github.com/llbbl/upkeep-rs/actions/workflows/ci.yml/badge.svg)
 ![crates.io](https://img.shields.io/crates/v/cargo-upkeep.svg)
-![License](https://img.shields.io/crates/l/cargo-upkeep.svg)
 
 Unified Rust project maintenance CLI.
 
@@ -36,14 +35,14 @@ cargo binstall cargo-upkeep
 ### From install script
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/llbbl/cargo-upkeep/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/llbbl/upkeep-rs/main/scripts/install.sh | bash
 ```
 
 ### From source (requires Rust 1.70+)
 
 ```bash
-git clone https://github.com/llbbl/cargo-upkeep
-cd cargo-upkeep
+git clone https://github.com/llbbl/upkeep-rs
+cd upkeep-rs
 cargo install --path .
 ```
 
@@ -296,7 +295,13 @@ cargo install cargo-geiger
 2. Keep changes focused and add tests for new behavior.
 3. Run `cargo fmt`, `cargo clippy`, and `cargo test` before submitting.
 
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md) for release history.
+
+This project uses [Conventional Commits](https://www.conventionalcommits.org/) and [git-cliff](https://git-cliff.org/) for automated changelog generation.
+
 ## License and credits
 
 MIT licensed. See `LICENSE`.
-Inspired by the JS/TS `upkeep` project and the Rust maintenance tool ecosystem.
+Inspired by the JS/TS [upkeep](https://github.com/llbbl/upkeep) project and the Rust maintenance tool ecosystem.
