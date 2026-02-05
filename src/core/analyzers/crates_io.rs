@@ -195,7 +195,7 @@ mod tests {
 
         let client = test_client(server.url(""));
         let result = client
-            .fetch_latest_versions(&vec!["serde".to_string()], true)
+            .fetch_latest_versions(&["serde".to_string()], true)
             .await
             .expect("fetch");
 
@@ -220,7 +220,7 @@ mod tests {
 
         let client = test_client(server.url(""));
         let result = client
-            .fetch_latest_versions(&vec!["tokio".to_string()], false)
+            .fetch_latest_versions(&["tokio".to_string()], false)
             .await
             .expect("fetch");
 
@@ -245,7 +245,7 @@ mod tests {
 
         let client = test_client(server.url(""));
         let result = client
-            .fetch_latest_versions(&vec!["empty".to_string()], true)
+            .fetch_latest_versions(&["empty".to_string()], true)
             .await
             .expect("fetch");
 
@@ -290,7 +290,7 @@ mod tests {
 
         let client = test_client(server.url(""));
         let result = client
-            .fetch_latest_versions(&vec!["nonexistent".to_string()], false)
+            .fetch_latest_versions(&["nonexistent".to_string()], false)
             .await;
 
         assert!(result.is_err());
@@ -310,7 +310,7 @@ mod tests {
 
         let client = test_client(server.url(""));
         let result = client
-            .fetch_latest_versions(&vec!["broken".to_string()], false)
+            .fetch_latest_versions(&["broken".to_string()], false)
             .await;
 
         assert!(result.is_err());
@@ -329,7 +329,7 @@ mod tests {
 
         let client = test_client(server.url(""));
         let result = client
-            .fetch_latest_versions(&vec!["badjson".to_string()], false)
+            .fetch_latest_versions(&["badjson".to_string()], false)
             .await;
 
         assert!(result.is_err());
@@ -344,7 +344,7 @@ mod tests {
         // Use a port that is not listening to simulate network error
         let client = test_client("http://127.0.0.1:1".to_string());
         let result = client
-            .fetch_latest_versions(&vec!["anypackage".to_string()], false)
+            .fetch_latest_versions(&["anypackage".to_string()], false)
             .await;
 
         assert!(result.is_err());
