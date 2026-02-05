@@ -34,9 +34,19 @@ fn cargo_subcommand_available(name: &str) -> bool {
 #[test]
 fn cli_without_args_shows_help() {
     let mut cmd = cargo_bin_cmd!("cargo-upkeep");
-    cmd.assert()
-        .failure()
-        .stderr(predicate::str::contains("Usage: cargo-upkeep"));
+    let output = cmd.output().expect("run cargo-upkeep");
+    // arg_required_else_help should always exit with code 2
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "expected exit status 2 (arg_required_else_help); status: {:?}",
+        output.status.code()
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Usage: cargo-upkeep"),
+        "expected help output in stderr; stderr: {stderr}"
+    );
 }
 
 #[test]
@@ -131,8 +141,7 @@ fn cli_audit_command_reports_missing_lockfile() {
         .assert()
         .failure()
         .stderr(
-            predicate::str::contains("failed to load")
-                .and(predicate::str::contains("Cargo.lock")),
+            predicate::str::contains("failed to load").and(predicate::str::contains("Cargo.lock")),
         );
 }
 

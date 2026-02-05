@@ -459,3 +459,78 @@ fn is_registry_source(source: Option<&String>) -> bool {
         Some(s) => s.starts_with("registry+"),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{classify_update, get_latest_version, is_registry_source, resolve_current_version};
+    use crate::core::analyzers::crates_io::VersionInfo;
+    use crate::core::output::UpdateType;
+    use semver::Version;
+    use std::collections::HashMap;
+
+    #[test]
+    fn classify_update_detects_major_minor_patch() {
+        let current = Version::new(1, 2, 3);
+        let major = Version::new(2, 0, 0);
+        let minor = Version::new(1, 3, 0);
+        let patch = Version::new(1, 2, 4);
+
+        assert!(matches!(
+            classify_update(&current, &major),
+            UpdateType::Major
+        ));
+        assert!(matches!(
+            classify_update(&current, &minor),
+            UpdateType::Minor
+        ));
+        assert!(matches!(
+            classify_update(&current, &patch),
+            UpdateType::Patch
+        ));
+    }
+
+    #[test]
+    fn resolve_current_version_prefers_alias_key() {
+        let mut versions = HashMap::new();
+        versions.insert("alias".to_string(), Version::new(2, 0, 0));
+        versions.insert("name".to_string(), Version::new(1, 0, 0));
+
+        let resolved = resolve_current_version("alias", "name", &versions);
+        assert_eq!(resolved, Some(Version::new(2, 0, 0)));
+    }
+
+    #[test]
+    fn resolve_current_version_falls_back_to_name() {
+        let mut versions = HashMap::new();
+        versions.insert("name".to_string(), Version::new(1, 4, 2));
+
+        let resolved = resolve_current_version("alias", "name", &versions);
+        assert_eq!(resolved, Some(Version::new(1, 4, 2)));
+    }
+
+    #[test]
+    fn get_latest_version_returns_latest_when_present() {
+        let mut versions = HashMap::new();
+        versions.insert(
+            "serde".to_string(),
+            VersionInfo {
+                name: "serde".to_string(),
+                latest: Some("1.0.200".to_string()),
+                latest_stable: None,
+            },
+        );
+
+        let latest = get_latest_version("serde", &versions);
+        assert_eq!(latest.as_deref(), Some("1.0.200"));
+    }
+
+    #[test]
+    fn is_registry_source_handles_registry_and_non_registry() {
+        let registry = Some("registry+https://example.com".to_string());
+        let git = Some("git+https://example.com/repo.git".to_string());
+
+        assert!(is_registry_source(None));
+        assert!(is_registry_source(registry.as_ref()));
+        assert!(!is_registry_source(git.as_ref()));
+    }
+}

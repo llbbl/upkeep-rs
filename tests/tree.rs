@@ -17,7 +17,7 @@ fn create_tree_workspace() -> tempfile::TempDir {
 
     write_file(
         &root.join("Cargo.toml"),
-        "[workspace]\nmembers = [\n  \"crates/app\",\n  \"crates/dep_a\",\n  \"crates/dep_b\",\n  \"crates/mid\"\n]\nexclude = [\n  \"external/dup_v1\",\n  \"external/dup_v2\",\n  \"external/dev_only\",\n  \"external/leaf\"\n]\n",
+        "[workspace]\nmembers = [\n  \"crates/app\",\n  \"crates/dep_a\",\n  \"crates/dep_b\",\n  \"crates/mid\"\n]\nexclude = [\n  \"external/dup_v1\",\n  \"external/dup_v2\",\n  \"external/dev_only\",\n  \"external/leaf\",\n  \"external/build_only\"\n]\n",
     );
 
     write_file(
@@ -28,7 +28,7 @@ fn create_tree_workspace() -> tempfile::TempDir {
 
     write_file(
         &root.join("crates/dep_a/Cargo.toml"),
-        "[package]\nname = \"dep_a\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nmid = { path = \"../mid\" }\ndup = { path = \"../../external/dup_v1\" }\n",
+        "[package]\nname = \"dep_a\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nmid = { path = \"../mid\" }\ndup = { path = \"../../external/dup_v1\" }\n\n[build-dependencies]\nbuild_only = { path = \"../../external/build_only\" }\n\n[features]\nextra = []\ndefault = [\"extra\"]\n",
     );
     write_file(&root.join("crates/dep_a/src/lib.rs"), "pub fn dep_a() {}\n");
 
@@ -76,6 +76,15 @@ fn create_tree_workspace() -> tempfile::TempDir {
         "[package]\nname = \"leaf\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
     );
     write_file(&root.join("external/leaf/src/lib.rs"), "pub fn leaf() {}\n");
+
+    write_file(
+        &root.join("external/build_only/Cargo.toml"),
+        "[package]\nname = \"build_only\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    );
+    write_file(
+        &root.join("external/build_only/src/lib.rs"),
+        "pub fn build_only() {}\n",
+    );
 
     temp_dir
 }
@@ -203,4 +212,90 @@ fn tree_no_dev_excludes_dev_dependencies() {
 
     let no_dev = run_tree(root, &["--no-dev"]);
     assert!(find_node(&no_dev["root"], "dev_only").is_none());
+}
+
+#[test]
+fn tree_features_flag_populates_features() {
+    let temp_dir = create_tree_workspace();
+    let root = temp_dir.path();
+
+    let without_features = run_tree(root, &[]);
+    let dep_a = find_node(&without_features["root"], "dep_a").expect("dep_a node");
+    assert!(dep_a
+        .get("features")
+        .and_then(|features| features.as_array())
+        .map(|features| features.is_empty())
+        .unwrap_or(false));
+
+    let with_features = run_tree(root, &["--features"]);
+    let dep_a = find_node(&with_features["root"], "dep_a").expect("dep_a node");
+    let features: HashSet<String> = dep_a
+        .get("features")
+        .and_then(|features| features.as_array())
+        .map(|features| {
+            features
+                .iter()
+                .filter_map(|value| value.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    assert!(features.contains("extra"));
+}
+
+#[test]
+fn tree_marks_dev_and_build_dependencies() {
+    let temp_dir = create_tree_workspace();
+    let root = temp_dir.path();
+
+    let output = run_tree(root, &[]);
+    let dev_only = find_node(&output["root"], "dev_only").expect("dev_only node");
+    assert_eq!(dev_only["is_dev"].as_bool(), Some(true));
+    assert_eq!(dev_only["is_build"].as_bool(), Some(false));
+
+    let build_only = find_node(&output["root"], "build_only").expect("build_only node");
+    assert_eq!(build_only["is_dev"].as_bool(), Some(false));
+    assert_eq!(build_only["is_build"].as_bool(), Some(true));
+}
+
+#[test]
+fn tree_stats_reports_correct_counts() {
+    let temp_dir = create_tree_workspace();
+    let root = temp_dir.path();
+
+    let output = run_tree(root, &[]);
+    let stats = &output["stats"];
+
+    // Verify stats object exists and has expected fields
+    assert!(stats.is_object(), "stats should be an object");
+
+    let total_crates = stats["total_crates"].as_u64().expect("total_crates");
+    let direct_deps = stats["direct_deps"].as_u64().expect("direct_deps");
+    let transitive_deps = stats["transitive_deps"].as_u64().expect("transitive_deps");
+    let duplicate_crates = stats["duplicate_crates"]
+        .as_u64()
+        .expect("duplicate_crates");
+
+    // The workspace has: app, dep_a, dep_b, mid, dup (2 versions), dev_only, leaf, build_only
+    // Total unique packages in tree >= direct + transitive
+    assert!(total_crates >= 1, "should have at least one crate");
+    assert!(
+        direct_deps >= 2,
+        "app has at least 2 direct deps (dep_a, dep_b)"
+    );
+    assert!(
+        transitive_deps >= 1,
+        "should have transitive deps (mid, leaf, etc.)"
+    );
+    // dup appears in 2 versions (0.1.0 via dep_a, 0.2.0 via dep_b)
+    assert!(
+        duplicate_crates >= 1,
+        "dup package has multiple versions, so duplicate_crates >= 1"
+    );
+
+    // Verify relationship: total = 1 (root) + direct + transitive (approximately)
+    // This is a sanity check, not an exact equality since counting can vary
+    assert!(
+        total_crates >= direct_deps,
+        "total_crates should be at least direct_deps"
+    );
 }

@@ -176,8 +176,7 @@ mod tests {
     use serde_json::json;
 
     fn test_client(base_url: String) -> CratesIoClient {
-        CratesIoClient::new_with_base_url(base_url, Duration::from_secs(0))
-            .expect("client")
+        CratesIoClient::new_with_base_url(base_url, Duration::from_secs(0)).expect("client")
     }
 
     #[tokio::test]
@@ -272,10 +271,16 @@ mod tests {
         let names = vec!["cached".to_string()];
 
         let first = client.fetch_latest_versions(&names, false).await.unwrap();
-        assert_eq!(first.get("cached").unwrap().latest.as_deref(), Some("1.2.3"));
+        assert_eq!(
+            first.get("cached").unwrap().latest.as_deref(),
+            Some("1.2.3")
+        );
 
         let second = client.fetch_latest_versions(&names, false).await.unwrap();
-        assert_eq!(second.get("cached").unwrap().latest.as_deref(), Some("1.2.3"));
+        assert_eq!(
+            second.get("cached").unwrap().latest.as_deref(),
+            Some("1.2.3")
+        );
 
         mock.assert_hits(1);
     }

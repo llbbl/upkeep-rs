@@ -287,61 +287,63 @@ mod tests {
         assert_eq!(summary.total, 5);
     }
 
-    /// Tests the DependencyGraph::path_to method with various lookup scenarios.
-    ///
-    /// This test relies on the current project's cargo metadata, which means:
-    /// - The project must have a root package (single-crate project or workspace with root)
-    /// - The project should have at least one registry dependency for the exact match test
-    ///
-    /// If these assumptions change (e.g., project becomes a workspace without root),
-    /// the test may need to be updated or use mock metadata.
     #[test]
-    fn dependency_graph_path_to_handles_matches_and_missing() {
+    fn dependency_graph_path_to_returns_none_for_missing_package() {
         let metadata = MetadataCommand::new().exec().expect("metadata");
         let graph = DependencyGraph::build(&metadata).expect("graph");
 
-        // Test fallback path lookup (using fake source to trigger fallback logic)
-        // This requires a root package to exist
-        let root = metadata.root_package();
-        if let Some(root) = root {
-            let fallback_path = graph
-                .path_to(&root.name, &root.version.to_string(), Some("registry+fake"))
-                .expect("fallback path should find root package");
-            assert_eq!(
-                fallback_path.last().map(String::as_str),
-                Some(root.name.as_str()),
-                "fallback path should end with the root package name"
-            );
-        } else {
-            // Workspace without root package - skip fallback test
-            eprintln!("Skipping fallback path test: no root package in workspace");
-        }
-
-        // Test exact source match (requires at least one registry dependency)
-        let registry_pkg = metadata.packages.iter().find(|pkg| pkg.source.is_some());
-        if let Some(registry_pkg) = registry_pkg {
-            let exact_path = graph
-                .path_to(
-                    &registry_pkg.name,
-                    &registry_pkg.version.to_string(),
-                    registry_pkg.source.as_ref().map(|src| src.repr.as_str()),
-                )
-                .expect("exact path should find registry package");
-            assert_eq!(
-                exact_path.last().map(String::as_str),
-                Some(registry_pkg.name.as_str()),
-                "exact path should end with the registry package name"
-            );
-        } else {
-            // No registry dependencies - skip exact match test
-            eprintln!("Skipping exact match test: no registry dependencies found");
-        }
-
-        // Test missing package (should always work)
         let missing = graph.path_to("missing-pkg-that-does-not-exist", "0.0.0", None);
         assert!(
             missing.is_none(),
             "path_to should return None for non-existent packages"
+        );
+    }
+
+    /// Tests fallback path lookup using a fake source to trigger fallback logic.
+    /// Requires the project to have a root package (not a workspace without root).
+    #[test]
+    fn dependency_graph_path_to_fallback_finds_root_package() {
+        let metadata = MetadataCommand::new().exec().expect("metadata");
+        let graph = DependencyGraph::build(&metadata).expect("graph");
+
+        let root = metadata
+            .root_package()
+            .expect("test requires a root package (not a workspace without root)");
+
+        let fallback_path = graph
+            .path_to(&root.name, &root.version.to_string(), Some("registry+fake"))
+            .expect("fallback path should find root package");
+        assert_eq!(
+            fallback_path.last().map(String::as_str),
+            Some(root.name.as_str()),
+            "fallback path should end with the root package name"
+        );
+    }
+
+    /// Tests exact source match path lookup.
+    /// Requires the project to have at least one registry dependency.
+    #[test]
+    fn dependency_graph_path_to_exact_match_finds_registry_package() {
+        let metadata = MetadataCommand::new().exec().expect("metadata");
+        let graph = DependencyGraph::build(&metadata).expect("graph");
+
+        let registry_pkg = metadata
+            .packages
+            .iter()
+            .find(|pkg| pkg.source.is_some())
+            .expect("test requires at least one registry dependency");
+
+        let exact_path = graph
+            .path_to(
+                &registry_pkg.name,
+                &registry_pkg.version.to_string(),
+                registry_pkg.source.as_ref().map(|src| src.repr.as_str()),
+            )
+            .expect("exact path should find registry package");
+        assert_eq!(
+            exact_path.last().map(String::as_str),
+            Some(registry_pkg.name.as_str()),
+            "exact path should end with the registry package name"
         );
     }
 }

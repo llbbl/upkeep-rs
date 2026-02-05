@@ -4,6 +4,7 @@ mod audit;
 mod deps;
 mod detect;
 mod quality;
+mod run_with;
 mod tree;
 mod unsafe_code;
 mod unused;
@@ -67,5 +68,10 @@ mod tests {
         for command in commands {
             handle(command, false).await.unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn detect_handler_supports_json_output() {
+        handle(UpkeepCommand::Detect, true).await.unwrap();
     }
 }

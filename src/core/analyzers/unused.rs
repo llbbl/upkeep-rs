@@ -1,7 +1,9 @@
 use cargo_metadata::MetadataCommand;
 use serde_json::Value;
+use std::future::Future;
 use std::path::Path;
 use std::path::PathBuf;
+use std::pin::Pin;
 
 use crate::core::analyzers::external_tool::{
     handle_tool_output, is_missing_subcommand, is_unknown_flag, run_cargo_tool, ExternalToolConfig,
@@ -14,6 +16,8 @@ const MACHETE_CONFIG: ExternalToolConfig<'static> = ExternalToolConfig {
     tool_name: "machete",
     install_hint: "cargo install cargo-machete",
 };
+const MACHETE_ARGS: [&str; 1] = ["machete"];
+const MACHETE_JSON_ARGS: [&str; 2] = ["machete", "--json"];
 
 pub async fn run_unused() -> Result<UnusedOutput> {
     let metadata = MetadataCommand::new().exec().map_err(|err| {
@@ -38,23 +42,35 @@ pub async fn run_unused() -> Result<UnusedOutput> {
 }
 
 async fn run_machete_json(workspace_root: &Path) -> Result<std::process::Output> {
-    let output = run_cargo_tool(&["machete", "--json"], workspace_root, &MACHETE_CONFIG).await?;
+    run_machete_json_with(workspace_root, |args, root| {
+        Box::pin(async move { run_cargo_tool(args, &root, &MACHETE_CONFIG).await })
+    })
+    .await
+}
+
+async fn run_machete_json_with<F>(
+    workspace_root: &Path,
+    run_tool: F,
+) -> Result<std::process::Output>
+where
+    F: Fn(
+        &'static [&'static str],
+        PathBuf,
+    ) -> Pin<Box<dyn Future<Output = Result<std::process::Output>> + Send + 'static>>,
+{
+    let output = run_tool(&MACHETE_JSON_ARGS, workspace_root.to_path_buf()).await?;
 
     // If the --json flag is not recognized, fall back to plain output
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         if is_unknown_flag(&stderr, "--json") {
-            return run_machete_plain(workspace_root).await;
+            let output = run_tool(&MACHETE_ARGS, workspace_root.to_path_buf()).await?;
+            return handle_tool_output(output, &MACHETE_CONFIG, |stderr| {
+                is_missing_subcommand(stderr, "machete")
+            });
         }
     }
 
-    handle_tool_output(output, &MACHETE_CONFIG, |stderr| {
-        is_missing_subcommand(stderr, "machete")
-    })
-}
-
-async fn run_machete_plain(workspace_root: &Path) -> Result<std::process::Output> {
-    let output = run_cargo_tool(&["machete"], workspace_root, &MACHETE_CONFIG).await?;
     handle_tool_output(output, &MACHETE_CONFIG, |stderr| {
         is_missing_subcommand(stderr, "machete")
     })
@@ -338,33 +354,7 @@ fn collect_possibly_unused(items: &[Value], possibly_unused: &mut Vec<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::future::Future;
     use std::sync::{Arc, Mutex};
-
-    async fn run_machete_json_with<F, Fut>(
-        workspace_root: &Path,
-        run_tool: F,
-    ) -> Result<std::process::Output>
-    where
-        F: Fn(&[&str], &Path, &ExternalToolConfig<'_>) -> Fut,
-        Fut: Future<Output = Result<std::process::Output>>,
-    {
-        let output = run_tool(&["machete", "--json"], workspace_root, &MACHETE_CONFIG).await?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            if is_unknown_flag(&stderr, "--json") {
-                let output = run_tool(&["machete"], workspace_root, &MACHETE_CONFIG).await?;
-                return handle_tool_output(output, &MACHETE_CONFIG, |stderr| {
-                    is_missing_subcommand(stderr, "machete")
-                });
-            }
-        }
-
-        handle_tool_output(output, &MACHETE_CONFIG, |stderr| {
-            is_missing_subcommand(stderr, "machete")
-        })
-    }
 
     #[test]
     fn parse_machete_output_handles_null() {
@@ -463,7 +453,11 @@ mod tests {
     #[tokio::test]
     async fn run_machete_json_with_falls_back_on_unknown_flag() {
         let outputs = Arc::new(Mutex::new(vec![
-            output_with(1, "", "error: Found argument '--json' which wasn't expected"),
+            output_with(
+                1,
+                "",
+                "error: Found argument '--json' which wasn't expected",
+            ),
             output_with(
                 0,
                 "Unused dependencies:\n- serde\nPossibly unused dependencies:\n- rand\n",
@@ -472,17 +466,21 @@ mod tests {
         ]));
         let calls = Arc::new(Mutex::new(Vec::<Vec<String>>::new()));
 
-        let run_tool = |args: &[&str], _: &Path, _: &ExternalToolConfig<'_>| {
+        let run_tool = |args: &'static [&'static str],
+                        _: PathBuf|
+         -> Pin<
+            Box<dyn Future<Output = Result<std::process::Output>> + Send + 'static>,
+        > {
             let outputs = Arc::clone(&outputs);
             let calls = Arc::clone(&calls);
             let args_vec = args.iter().map(|arg| (*arg).to_string()).collect();
-            async move {
+            Box::pin(async move {
                 calls.lock().unwrap().push(args_vec);
                 Ok(outputs.lock().unwrap().remove(0))
-            }
+            })
         };
 
-        let output = run_machete_json_with(Path::new("."), &run_tool)
+        let output = run_machete_json_with(Path::new("."), run_tool)
             .await
             .expect("output");
         let stdout = String::from_utf8(output.stdout).expect("stdout");
@@ -492,12 +490,27 @@ mod tests {
         assert_eq!(unused[0].name, "serde");
         assert_eq!(unused[0].confidence, Confidence::Medium);
         assert_eq!(possibly_unused, vec!["rand".to_string()]);
+
+        // Semantic check: verify we made exactly 2 calls
+        let recorded_calls = calls.lock().unwrap();
         assert_eq!(
-            calls.lock().unwrap().as_slice(),
-            &[
-                vec!["machete".to_string(), "--json".to_string()],
-                vec!["machete".to_string()]
-            ]
+            recorded_calls.len(),
+            2,
+            "should make exactly 2 calls (first with --json, then fallback)"
+        );
+
+        // First call should include --json flag
+        assert!(
+            recorded_calls[0].contains(&"--json".to_string()),
+            "first call should include --json flag; got: {:?}",
+            recorded_calls[0]
+        );
+
+        // Second call (fallback) should NOT include --json flag
+        assert!(
+            !recorded_calls[1].contains(&"--json".to_string()),
+            "fallback call should not include --json flag; got: {:?}",
+            recorded_calls[1]
         );
     }
 
@@ -509,16 +522,20 @@ mod tests {
             "error: no such subcommand: `machete`",
         )]));
 
-        let run_tool = |args: &[&str], _: &Path, _: &ExternalToolConfig<'_>| {
+        let run_tool = |args: &'static [&'static str],
+                        _: PathBuf|
+         -> Pin<
+            Box<dyn Future<Output = Result<std::process::Output>> + Send + 'static>,
+        > {
             let outputs = Arc::clone(&outputs);
             let args_vec: Vec<String> = args.iter().map(|arg| (*arg).to_string()).collect();
-            async move {
+            Box::pin(async move {
                 assert_eq!(args_vec, vec!["machete".to_string(), "--json".to_string()]);
                 Ok(outputs.lock().unwrap().remove(0))
-            }
+            })
         };
 
-        let err = run_machete_json_with(Path::new("."), &run_tool)
+        let err = run_machete_json_with(Path::new("."), run_tool)
             .await
             .unwrap_err();
         assert_eq!(err.code(), ErrorCode::MissingTool);

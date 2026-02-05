@@ -170,7 +170,10 @@ mod tests {
         let output = parse_clippy_output(stdout, false, "0");
         assert_eq!(output.warnings, 1);
         assert_eq!(output.errors, 1);
-        assert_eq!(output.warnings_by_lint.get("clippy::needless_return"), Some(&1));
+        assert_eq!(
+            output.warnings_by_lint.get("clippy::needless_return"),
+            Some(&1)
+        );
         assert_eq!(output.details.len(), 2);
         assert_eq!(output.details[0].file.as_deref(), Some("src/lib.rs"));
         assert_eq!(output.details[0].line, Some(10));

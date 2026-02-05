@@ -123,8 +123,8 @@ pub fn init_logging(verbose: bool, log_level: Option<&str>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{Cli, Command, TreeArgs, UpkeepCommand};
-    use clap::{error::ErrorKind, Parser};
     use crate::core::error::ErrorCode;
+    use clap::{error::ErrorKind, Parser};
 
     #[test]
     fn parses_upkeep_subcommand() {
@@ -212,7 +212,10 @@ mod tests {
     #[test]
     fn missing_subcommand_returns_error() {
         let err = Cli::try_parse_from(["cargo-upkeep"]).unwrap_err();
-        assert_eq!(err.kind(), ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand);
+        assert_eq!(
+            err.kind(),
+            ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
+        );
     }
 
     #[test]

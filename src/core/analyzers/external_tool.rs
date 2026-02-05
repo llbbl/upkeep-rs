@@ -240,9 +240,7 @@ mod tests {
 
         assert!(matches!(err, UpkeepError::Message { .. }));
         assert_eq!(err.code(), ErrorCode::MissingTool);
-        assert!(err
-            .to_string()
-            .contains("cargo-geiger is not installed"));
+        assert!(err.to_string().contains("cargo-geiger is not installed"));
     }
 
     #[test]
