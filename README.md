@@ -6,6 +6,28 @@ Unified Rust project maintenance CLI.
 
 Work in progress.
 
+## Installation
+
+### From source (requires Rust 1.70+)
+
+```bash
+git clone https://github.com/llbbl/cargo-upkeep
+cd cargo-upkeep
+cargo install --path .
+```
+
+### From crates.io (once published)
+
+```bash
+cargo install cargo-upkeep
+```
+
+### Using cargo-binstall (once published)
+
+```bash
+cargo binstall cargo-upkeep
+```
+
 ## Usage
 
 ```bash
@@ -30,6 +52,14 @@ cargo upkeep unsafe-code
 cargo upkeep tree
 ```
 
+Deps flags:
+
+```bash
+cargo upkeep deps --security
+```
+
+The security scan uses RustSec data from `Cargo.lock` and reports direct workspace dependencies.
+
 Global flags:
 
 ```bash
@@ -37,6 +67,16 @@ Global flags:
 --verbose
 --log-level <level>
 ```
+
+## Rate limiting
+
+Crates.io requests are serialized and rate-limited to roughly one request per second.
+Large dependency sets will take at least one second per crate, plus network time.
+
+## Test tooling
+
+- Some integration tests use `httpmock` for crates.io client behavior.
+- Full test coverage for `unused` and `unsafe-code` requires `cargo-machete` and `cargo-geiger`.
 
 ## Development
 
