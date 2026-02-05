@@ -1,6 +1,6 @@
 [package]
 name = "cargo-upkeep"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2021"
 description = "Unified Rust project maintenance CLI (cargo subcommand)"
 repository = "https://github.com/llbbl/upkeep-rs"
