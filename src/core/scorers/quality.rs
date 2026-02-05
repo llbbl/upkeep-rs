@@ -227,3 +227,131 @@ fn recommendations_for(metrics: &[MetricScore]) -> Vec<String> {
     items.sort_by(|a, b| b.0.total_cmp(&a.0));
     items.into_iter().map(|(_, message)| message).collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn assert_close(actual: f32, expected: f32) {
+        assert!(
+            (actual - expected).abs() < 0.01,
+            "expected {expected}, got {actual}"
+        );
+    }
+
+    #[test]
+    fn dependency_freshness_score_handles_zero_total() {
+        let input = DependencyFreshness {
+            total: 0,
+            outdated: 0,
+        };
+        assert_close(dependency_freshness_score(&input), 100.0);
+    }
+
+    #[test]
+    fn dependency_freshness_score_computes_ratio() {
+        let input = DependencyFreshness {
+            total: 10,
+            outdated: 2,
+        };
+        assert_close(dependency_freshness_score(&input), 80.0);
+    }
+
+    #[test]
+    fn security_score_applies_penalties() {
+        let summary = SecuritySummary {
+            critical: 1,
+            high: 2,
+            moderate: 3,
+            low: 4,
+        };
+        // Penalty: 25 + 30 + 15 + 8 = 78
+        assert_close(security_score(&summary), 22.0);
+    }
+
+    #[test]
+    fn clippy_score_applies_penalties() {
+        let summary = ClippySummary {
+            warnings: 3,
+            errors: 1,
+        };
+        assert_close(clippy_score(&summary), 84.0);
+    }
+
+    #[test]
+    fn unused_deps_score_applies_penalties() {
+        let summary = UnusedSummary { unused_count: 4 };
+        assert_close(unused_deps_score(&summary), 80.0);
+    }
+
+    #[test]
+    fn unsafe_code_score_handles_buckets() {
+        let zero = UnsafeSummary { total_unsafe: 0 };
+        let few = UnsafeSummary { total_unsafe: 3 };
+        let many = UnsafeSummary { total_unsafe: 8 };
+
+        assert_close(unsafe_code_score(&zero), 100.0);
+        assert_close(unsafe_code_score(&few), 85.0);
+        assert_close(unsafe_code_score(&many), 72.0);
+    }
+
+    #[test]
+    fn msrv_score_handles_status() {
+        assert_close(msrv_score(&MsrvStatus::Valid), 100.0);
+        assert_close(msrv_score(&MsrvStatus::Missing), 50.0);
+        assert_close(msrv_score(&MsrvStatus::Invalid), 0.0);
+    }
+
+    #[test]
+    fn grade_for_respects_boundaries() {
+        assert!(matches!(grade_for(92.0), Grade::A));
+        assert!(matches!(grade_for(89.99), Grade::B));
+        assert!(matches!(grade_for(79.99), Grade::C));
+        assert!(matches!(grade_for(69.99), Grade::D));
+        assert!(matches!(grade_for(59.99), Grade::F));
+    }
+
+    #[test]
+    fn recommendations_sorted_by_impact() {
+        let metrics = vec![
+            MetricScore {
+                name: "Dependency freshness".to_string(),
+                score: 60.0,
+                weight: WEIGHT_DEPENDENCY_FRESHNESS,
+            },
+            MetricScore {
+                name: "Security".to_string(),
+                score: 70.0,
+                weight: WEIGHT_SECURITY,
+            },
+            MetricScore {
+                name: "Clippy".to_string(),
+                score: 80.0,
+                weight: WEIGHT_CLIPPY,
+            },
+            MetricScore {
+                name: "Unused dependencies".to_string(),
+                score: 90.0,
+                weight: WEIGHT_UNUSED_DEPS,
+            },
+            MetricScore {
+                name: "Unsafe code".to_string(),
+                score: 95.0,
+                weight: WEIGHT_UNSAFE_CODE,
+            },
+            MetricScore {
+                name: "MSRV".to_string(),
+                score: 50.0,
+                weight: WEIGHT_MSRV,
+            },
+        ];
+
+        let recommendations = recommendations_for(&metrics);
+        assert_eq!(recommendations[0], "Update outdated dependencies.");
+        assert_eq!(recommendations[1], "Address security advisories.");
+        assert_eq!(recommendations[2], "Declare a valid MSRV in Cargo.toml.");
+        assert_eq!(recommendations[3], "Fix clippy warnings and errors.");
+        assert_eq!(recommendations[4], "Remove unused dependencies.");
+        assert_eq!(recommendations[5], "Reduce unsafe code usage.");
+    }
+}

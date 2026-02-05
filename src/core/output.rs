@@ -229,7 +229,7 @@ pub enum UpdateType {
     Patch,
 }
 
-#[derive(Debug, Serialize, Clone, Copy)]
+#[derive(Debug, Serialize, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum DependencyType {
     Normal,
@@ -643,20 +643,259 @@ impl fmt::Display for Grade {
 
 #[cfg(test)]
 mod tests {
-    use super::{Grade, QualityOutput};
+    use super::*;
+    use serde_json::Value;
+
+    fn value_at<'a>(value: &'a Value, key: &str) -> &'a Value {
+        value
+            .get(key)
+            .unwrap_or_else(|| panic!("missing key {key}"))
+    }
 
     #[test]
-    fn output_module_smoke() {
-        let output = QualityOutput {
-            score: 92.5,
-            grade: Grade::A,
-            breakdown: Vec::new(),
-            recommendations: Vec::new(),
+    fn serialize_enums() {
+        assert_eq!(
+            serde_json::to_value(Severity::High).unwrap(),
+            Value::String("high".into())
+        );
+        assert_eq!(
+            serde_json::to_value(UpdateType::Minor).unwrap(),
+            Value::String("minor".into())
+        );
+        assert_eq!(
+            serde_json::to_value(DependencyType::Dev).unwrap(),
+            Value::String("dev".into())
+        );
+        assert_eq!(
+            serde_json::to_value(SkipReason::TargetSpecific).unwrap(),
+            Value::String("target_specific".into())
+        );
+        assert_eq!(
+            serde_json::to_value(Grade::A).unwrap(),
+            Value::String("A".into())
+        );
+        assert_eq!(
+            serde_json::to_value(Confidence::Medium).unwrap(),
+            Value::String("medium".into())
+        );
+    }
+
+    #[test]
+    fn serialize_outputs() {
+        let detect = DetectOutput {
+            edition: Some("2021".to_string()),
+            msrv: Some("1.70".to_string()),
+            workspace: true,
+            members: vec!["core".to_string()],
+            package: Some("upkeep".to_string()),
+            version: Some("0.1.0".to_string()),
+            dependencies: 3,
+            features: vec!["default".to_string()],
+            targets: vec!["x86_64-apple-darwin".to_string()],
+            tooling: vec!["clippy".to_string()],
+            ci: vec!["github".to_string()],
         };
 
-        // Test that serialization succeeds without printing to stdout
-        let json = serde_json::to_string_pretty(&output).unwrap();
-        assert!(json.contains("\"score\": 92.5"));
-        assert!(json.contains("\"grade\": \"A\""));
+        let audit = AuditOutput {
+            vulnerabilities: vec![Vulnerability {
+                package: "serde".to_string(),
+                package_version: "1.0.0".to_string(),
+                advisory_id: "RUSTSEC-0000-0000".to_string(),
+                severity: Severity::High,
+                title: "Example".to_string(),
+                path: vec!["root".to_string(), "serde".to_string()],
+                fix_available: true,
+            }],
+            summary: AuditSummary {
+                critical: 0,
+                high: 1,
+                moderate: 0,
+                low: 0,
+                total: 1,
+            },
+        };
+
+        let deps = DepsOutput {
+            total: 2,
+            outdated: 1,
+            major: 1,
+            minor: 0,
+            patch: 0,
+            packages: vec![OutdatedPackage {
+                name: "serde".to_string(),
+                alias: None,
+                current: "1.0.0".to_string(),
+                latest: "1.0.1".to_string(),
+                required: "^1.0".to_string(),
+                update_type: UpdateType::Patch,
+                dependency_type: DependencyType::Normal,
+            }],
+            skipped: 1,
+            skipped_packages: vec![SkippedDependency {
+                name: "serde".to_string(),
+                alias: None,
+                required: "^1.0".to_string(),
+                reason: SkipReason::TargetSpecific,
+                dependency_type: DependencyType::Normal,
+                source: None,
+                target: Some("x86_64-unknown-linux-gnu".to_string()),
+            }],
+            warnings: vec!["rustsec unavailable".to_string()],
+            security: Some(DepsSecurityOutput {
+                summary: AuditSummary {
+                    critical: 0,
+                    high: 1,
+                    moderate: 0,
+                    low: 0,
+                    total: 1,
+                },
+                packages: vec![DepsSecurityPackage {
+                    name: "serde".to_string(),
+                    alias: None,
+                    current: "1.0.0".to_string(),
+                    dependency_type: DependencyType::Normal,
+                    vulnerabilities: vec![DepsSecurityVulnerability {
+                        advisory_id: "RUSTSEC-0000-0000".to_string(),
+                        severity: Severity::High,
+                        title: "Example".to_string(),
+                        fix_available: true,
+                    }],
+                }],
+            }),
+            workspace: true,
+            members: vec!["core".to_string()],
+            skipped_members: vec!["legacy".to_string()],
+        };
+
+        let unused = UnusedOutput {
+            unused: vec![UnusedDep {
+                name: "tokio".to_string(),
+                dependency_type: DependencyType::Dev,
+                confidence: Confidence::High,
+            }],
+            possibly_unused: vec!["serde".to_string()],
+        };
+
+        let unsafe_output = UnsafeOutput {
+            summary: UnsafeSummary {
+                packages: 1,
+                unsafe_functions: 2,
+                unsafe_impls: 1,
+                unsafe_traits: 0,
+                unsafe_blocks: 3,
+                unsafe_expressions: 1,
+                total_unsafe: 7,
+            },
+            packages: vec![UnsafePackage {
+                name: "ffi".to_string(),
+                version: "0.1.0".to_string(),
+                package_id: Some("ffi 0.1.0 (path+file://...)".to_string()),
+                unsafe_functions: 2,
+                unsafe_impls: 1,
+                unsafe_traits: 0,
+                unsafe_blocks: 3,
+                unsafe_expressions: 1,
+                total_unsafe: 7,
+            }],
+        };
+
+        let tree = TreeOutput {
+            root: TreeNode {
+                name: "root".to_string(),
+                version: "0.1.0".to_string(),
+                package_id: "root 0.1.0".to_string(),
+                features: vec!["default".to_string()],
+                dependencies: vec![TreeNode {
+                    name: "dep".to_string(),
+                    version: "1.2.3".to_string(),
+                    package_id: "dep 1.2.3".to_string(),
+                    features: Vec::new(),
+                    dependencies: Vec::new(),
+                    is_dev: false,
+                    is_build: false,
+                    duplicate: false,
+                }],
+                is_dev: false,
+                is_build: false,
+                duplicate: false,
+            },
+            stats: TreeStats {
+                total_crates: 2,
+                direct_deps: 1,
+                transitive_deps: 0,
+                duplicate_crates: 0,
+            },
+        };
+
+        let quality = QualityOutput {
+            score: 92.5,
+            grade: Grade::A,
+            breakdown: vec![MetricScore {
+                name: "Security".to_string(),
+                score: 90.0,
+                weight: 0.25,
+            }],
+            recommendations: vec!["Address security advisories.".to_string()],
+        };
+
+        let detect_value = serde_json::to_value(&detect).unwrap();
+        assert_eq!(value_at(&detect_value, "workspace"), &Value::Bool(true));
+        assert_eq!(
+            value_at(&detect_value, "members")[0],
+            Value::String("core".into())
+        );
+
+        let audit_value = serde_json::to_value(&audit).unwrap();
+        assert_eq!(
+            value_at(&audit_value, "summary")["high"],
+            Value::Number(1.into())
+        );
+        assert_eq!(
+            value_at(&audit_value, "vulnerabilities")[0]["severity"],
+            Value::String("high".into())
+        );
+
+        let deps_value = serde_json::to_value(&deps).unwrap();
+        assert_eq!(value_at(&deps_value, "outdated"), &Value::Number(1.into()));
+        assert_eq!(
+            value_at(&deps_value, "security")["packages"][0]["vulnerabilities"][0]["advisory_id"],
+            Value::String("RUSTSEC-0000-0000".into())
+        );
+
+        let unused_value = serde_json::to_value(&unused).unwrap();
+        assert_eq!(
+            value_at(&unused_value, "unused")[0]["confidence"],
+            Value::String("high".into())
+        );
+
+        let unsafe_value = serde_json::to_value(&unsafe_output).unwrap();
+        assert_eq!(
+            value_at(&unsafe_value, "summary")["total_unsafe"],
+            Value::Number(7.into())
+        );
+        assert_eq!(
+            value_at(&unsafe_value, "packages")[0]["name"],
+            Value::String("ffi".into())
+        );
+
+        let tree_value = serde_json::to_value(&tree).unwrap();
+        assert_eq!(
+            value_at(&tree_value, "stats")["direct_deps"],
+            Value::Number(1.into())
+        );
+        assert_eq!(
+            value_at(&tree_value, "root")["dependencies"][0]["name"],
+            Value::String("dep".into())
+        );
+
+        let quality_value = serde_json::to_value(&quality).unwrap();
+        assert_eq!(
+            value_at(&quality_value, "grade"),
+            &Value::String("A".into())
+        );
+        assert_eq!(
+            value_at(&quality_value, "breakdown")[0]["name"],
+            Value::String("Security".into())
+        );
     }
 }

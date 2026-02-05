@@ -119,6 +119,26 @@ pub fn is_unknown_flag(stderr: &str, flag_name: &str) -> bool {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    fn exit_status(code: i32) -> std::process::ExitStatus {
+        use std::os::unix::process::ExitStatusExt;
+        std::process::ExitStatus::from_raw(code << 8)
+    }
+
+    #[cfg(windows)]
+    fn exit_status(code: i32) -> std::process::ExitStatus {
+        use std::os::windows::process::ExitStatusExt;
+        std::process::ExitStatus::from_raw(code as u32)
+    }
+
+    fn output_with(code: i32, stdout: &str, stderr: &str) -> std::process::Output {
+        std::process::Output {
+            status: exit_status(code),
+            stdout: stdout.as_bytes().to_vec(),
+            stderr: stderr.as_bytes().to_vec(),
+        }
+    }
+
     #[test]
     fn test_is_missing_subcommand() {
         // Positive cases - should detect missing subcommand
@@ -193,5 +213,72 @@ mod tests {
 
         For more information try --help"#;
         assert!(is_unknown_flag(stderr, "--output-format"));
+    }
+
+    #[test]
+    fn handle_tool_output_success_returns_ok() {
+        let config = ExternalToolConfig {
+            tool_name: "machete",
+            install_hint: "cargo install cargo-machete",
+        };
+        let output = output_with(0, "{\"unused\":[]}", "");
+        let result = handle_tool_output(output, &config, |_| false).unwrap();
+        assert!(!result.stdout.is_empty());
+    }
+
+    #[test]
+    fn handle_tool_output_missing_tool_returns_missing_tool_error() {
+        let config = ExternalToolConfig {
+            tool_name: "geiger",
+            install_hint: "cargo install cargo-geiger",
+        };
+        let output = output_with(1, "", "error: no such subcommand: `geiger`");
+        let err = handle_tool_output(output, &config, |stderr| {
+            is_missing_subcommand(stderr, "geiger")
+        })
+        .unwrap_err();
+
+        assert!(matches!(err, UpkeepError::Message { .. }));
+        assert_eq!(err.code(), ErrorCode::MissingTool);
+        assert!(err
+            .to_string()
+            .contains("cargo-geiger is not installed"));
+    }
+
+    #[test]
+    fn handle_tool_output_nonzero_with_stdout_is_ok() {
+        let config = ExternalToolConfig {
+            tool_name: "machete",
+            install_hint: "cargo install cargo-machete",
+        };
+        let output = output_with(1, "{\"unused\":[]}", "warning");
+        let result = handle_tool_output(output, &config, |_| false).unwrap();
+        assert!(!result.stdout.is_empty());
+    }
+
+    #[test]
+    fn handle_tool_output_empty_stderr_returns_error() {
+        let config = ExternalToolConfig {
+            tool_name: "machete",
+            install_hint: "cargo install cargo-machete",
+        };
+        let output = output_with(1, "", "");
+        let err = handle_tool_output(output, &config, |_| false).unwrap_err();
+        assert_eq!(err.code(), ErrorCode::ExternalCommand);
+        assert!(err
+            .to_string()
+            .contains("cargo machete failed with no stderr output"));
+    }
+
+    #[test]
+    fn handle_tool_output_stderr_message_bubbles_up() {
+        let config = ExternalToolConfig {
+            tool_name: "machete",
+            install_hint: "cargo install cargo-machete",
+        };
+        let output = output_with(1, "", "boom");
+        let err = handle_tool_output(output, &config, |_| false).unwrap_err();
+        assert_eq!(err.code(), ErrorCode::ExternalCommand);
+        assert!(err.to_string().contains("cargo machete failed: boom"));
     }
 }

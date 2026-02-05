@@ -180,3 +180,40 @@ impl fmt::Display for ErrorCode {
         write!(f, "{label}")
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn error_code_serializes_and_displays() {
+        let value = serde_json::to_value(ErrorCode::ExternalCommand).unwrap();
+        assert_eq!(value, serde_json::Value::String("external_command".into()));
+        assert_eq!(ErrorCode::ExternalCommand.to_string(), "external_command");
+    }
+
+    #[test]
+    fn message_error_preserves_code_and_message() {
+        let err = UpkeepError::message(ErrorCode::InvalidData, "bad input");
+        assert_eq!(err.code(), ErrorCode::InvalidData);
+        assert_eq!(err.to_string(), "bad input");
+
+        let response = ErrorResponse::from(&err);
+        assert_eq!(response.code, ErrorCode::InvalidData);
+        assert_eq!(response.message, "bad input");
+        assert!(response.causes.is_empty());
+    }
+
+    #[test]
+    fn context_error_includes_causes() {
+        let source = std::io::Error::new(std::io::ErrorKind::Other, "disk full");
+        let err = UpkeepError::context(ErrorCode::Io, "write failed", source);
+        assert_eq!(err.code(), ErrorCode::Io);
+        assert_eq!(err.to_string(), "write failed");
+
+        let response = ErrorResponse::from(&err);
+        assert_eq!(response.code, ErrorCode::Io);
+        assert_eq!(response.message, "write failed");
+        assert_eq!(response.causes, vec!["disk full".to_string()]);
+    }
+}

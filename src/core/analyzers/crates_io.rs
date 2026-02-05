@@ -22,6 +22,8 @@ pub struct CratesIoClient {
     http: Client,
     cache: Arc<Mutex<HashMap<String, VersionInfo>>>,
     limiter: Arc<Semaphore>,
+    base_url: String,
+    rate_limit_delay: Duration,
 }
 
 impl CratesIoClient {
@@ -33,6 +35,21 @@ impl CratesIoClient {
             cache: Arc::new(Mutex::new(HashMap::new())),
             // crates.io rate limit: 1 request per second
             limiter: Arc::new(Semaphore::new(1)),
+            base_url: "https://crates.io/api/v1".to_string(),
+            rate_limit_delay: Duration::from_secs(1),
+        })
+    }
+
+    #[cfg(test)]
+    fn new_with_base_url(base_url: String, rate_limit_delay: Duration) -> Result<Self> {
+        let http = Client::builder().user_agent("cargo-upkeep").build()?;
+
+        Ok(Self {
+            http,
+            cache: Arc::new(Mutex::new(HashMap::new())),
+            limiter: Arc::new(Semaphore::new(1)),
+            base_url,
+            rate_limit_delay,
         })
     }
 
@@ -86,9 +103,9 @@ impl CratesIoClient {
     ) -> Result<VersionInfo> {
         // Rate limit: wait 1 second before making the request
         // This ensures we don't exceed crates.io rate limits (1 req/sec)
-        sleep(Duration::from_secs(1)).await;
+        sleep(self.rate_limit_delay).await;
 
-        let url = format!("https://crates.io/api/v1/crates/{name}");
+        let url = format!("{}/crates/{name}", self.base_url);
         let response = self.http.get(&url).send().await.map_err(|err| {
             UpkeepError::context(
                 ErrorCode::Http,
@@ -149,4 +166,190 @@ struct CratesIoResponse {
 struct CratesIoCrate {
     max_version: Option<String>,
     max_stable_version: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use httpmock::Method::GET;
+    use httpmock::MockServer;
+    use serde_json::json;
+
+    fn test_client(base_url: String) -> CratesIoClient {
+        CratesIoClient::new_with_base_url(base_url, Duration::from_secs(0))
+            .expect("client")
+    }
+
+    #[tokio::test]
+    async fn fetch_latest_versions_prefers_prerelease_when_allowed() {
+        let server = MockServer::start();
+        let mock = server.mock(|when, then| {
+            when.method(GET).path("/crates/serde");
+            then.status(200).json_body(json!({
+                "crate": {
+                    "max_version": "2.0.0-beta.1",
+                    "max_stable_version": "1.0.190"
+                }
+            }));
+        });
+
+        let client = test_client(server.url(""));
+        let result = client
+            .fetch_latest_versions(&vec!["serde".to_string()], true)
+            .await
+            .expect("fetch");
+
+        let info = result.get("serde").expect("serde info");
+        assert_eq!(info.latest.as_deref(), Some("2.0.0-beta.1"));
+        assert_eq!(info.latest_stable.as_deref(), Some("1.0.190"));
+        mock.assert_hits(1);
+    }
+
+    #[tokio::test]
+    async fn fetch_latest_versions_prefers_stable_when_prerelease_not_allowed() {
+        let server = MockServer::start();
+        let mock = server.mock(|when, then| {
+            when.method(GET).path("/crates/tokio");
+            then.status(200).json_body(json!({
+                "crate": {
+                    "max_version": "2.0.0-beta.1",
+                    "max_stable_version": "1.35.1"
+                }
+            }));
+        });
+
+        let client = test_client(server.url(""));
+        let result = client
+            .fetch_latest_versions(&vec!["tokio".to_string()], false)
+            .await
+            .expect("fetch");
+
+        let info = result.get("tokio").expect("tokio info");
+        assert_eq!(info.latest.as_deref(), Some("1.35.1"));
+        assert_eq!(info.latest_stable.as_deref(), Some("1.35.1"));
+        mock.assert_hits(1);
+    }
+
+    #[tokio::test]
+    async fn fetch_latest_versions_falls_back_when_versions_missing() {
+        let server = MockServer::start();
+        let mock = server.mock(|when, then| {
+            when.method(GET).path("/crates/empty");
+            then.status(200).json_body(json!({
+                "crate": {
+                    "max_version": null,
+                    "max_stable_version": null
+                }
+            }));
+        });
+
+        let client = test_client(server.url(""));
+        let result = client
+            .fetch_latest_versions(&vec!["empty".to_string()], true)
+            .await
+            .expect("fetch");
+
+        let info = result.get("empty").expect("empty info");
+        assert!(info.latest.is_none());
+        assert!(info.latest_stable.is_none());
+        mock.assert_hits(1);
+    }
+
+    #[tokio::test]
+    async fn fetch_latest_versions_uses_cache() {
+        let server = MockServer::start();
+        let mock = server.mock(|when, then| {
+            when.method(GET).path("/crates/cached");
+            then.status(200).json_body(json!({
+                "crate": {
+                    "max_version": "1.2.3",
+                    "max_stable_version": "1.2.3"
+                }
+            }));
+        });
+
+        let client = test_client(server.url(""));
+        let names = vec!["cached".to_string()];
+
+        let first = client.fetch_latest_versions(&names, false).await.unwrap();
+        assert_eq!(first.get("cached").unwrap().latest.as_deref(), Some("1.2.3"));
+
+        let second = client.fetch_latest_versions(&names, false).await.unwrap();
+        assert_eq!(second.get("cached").unwrap().latest.as_deref(), Some("1.2.3"));
+
+        mock.assert_hits(1);
+    }
+
+    #[tokio::test]
+    async fn fetch_latest_versions_handles_404_response() {
+        let server = MockServer::start();
+        let mock = server.mock(|when, then| {
+            when.method(GET).path("/crates/nonexistent");
+            then.status(404).body("Not Found");
+        });
+
+        let client = test_client(server.url(""));
+        let result = client
+            .fetch_latest_versions(&vec!["nonexistent".to_string()], false)
+            .await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.code(), crate::core::error::ErrorCode::Http);
+        assert!(err.to_string().contains("HTTP error"));
+        mock.assert_hits(1);
+    }
+
+    #[tokio::test]
+    async fn fetch_latest_versions_handles_500_response() {
+        let server = MockServer::start();
+        let mock = server.mock(|when, then| {
+            when.method(GET).path("/crates/broken");
+            then.status(500).body("Internal Server Error");
+        });
+
+        let client = test_client(server.url(""));
+        let result = client
+            .fetch_latest_versions(&vec!["broken".to_string()], false)
+            .await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.code(), crate::core::error::ErrorCode::Http);
+        mock.assert_hits(1);
+    }
+
+    #[tokio::test]
+    async fn fetch_latest_versions_handles_invalid_json() {
+        let server = MockServer::start();
+        let mock = server.mock(|when, then| {
+            when.method(GET).path("/crates/badjson");
+            then.status(200).body("not valid json");
+        });
+
+        let client = test_client(server.url(""));
+        let result = client
+            .fetch_latest_versions(&vec!["badjson".to_string()], false)
+            .await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.code(), crate::core::error::ErrorCode::Json);
+        assert!(err.to_string().contains("failed to parse JSON"));
+        mock.assert_hits(1);
+    }
+
+    #[tokio::test]
+    async fn fetch_latest_versions_handles_network_error() {
+        // Use a port that is not listening to simulate network error
+        let client = test_client("http://127.0.0.1:1".to_string());
+        let result = client
+            .fetch_latest_versions(&vec!["anypackage".to_string()], false)
+            .await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.code(), crate::core::error::ErrorCode::Http);
+        assert!(err.to_string().contains("failed to fetch crate info"));
+    }
 }

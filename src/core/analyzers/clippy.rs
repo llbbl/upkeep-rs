@@ -61,6 +61,18 @@ pub async fn run_clippy() -> Result<ClippyOutput> {
     let clippy_status = output.status.to_string();
 
     let stdout = String::from_utf8_lossy(&output.stdout);
+    Ok(parse_clippy_output(&stdout, clippy_failed, &clippy_status))
+}
+
+fn is_clippy_missing(stderr: &str) -> bool {
+    let stderr = stderr.to_lowercase();
+    stderr.contains("clippy is not installed")
+        || stderr.contains("no such subcommand: clippy")
+        || stderr.contains("component 'clippy' is missing")
+        || stderr.contains("rustup component add clippy")
+}
+
+fn parse_clippy_output(stdout: &str, clippy_failed: bool, clippy_status: &str) -> ClippyOutput {
     let mut warnings = 0;
     let mut errors = 0;
     let mut warnings_by_lint: HashMap<String, usize> = HashMap::new();
@@ -126,19 +138,53 @@ pub async fn run_clippy() -> Result<ClippyOutput> {
     let penalty = (warnings as u64 * 2) + (errors as u64 * 10);
     let score = 100u64.saturating_sub(penalty) as f32;
 
-    Ok(ClippyOutput {
+    ClippyOutput {
         warnings,
         errors,
         warnings_by_lint,
         details,
         score,
-    })
+    }
 }
 
-fn is_clippy_missing(stderr: &str) -> bool {
-    let stderr = stderr.to_lowercase();
-    stderr.contains("clippy is not installed")
-        || stderr.contains("no such subcommand: clippy")
-        || stderr.contains("component 'clippy' is missing")
-        || stderr.contains("rustup component add clippy")
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clippy_missing_detection() {
+        assert!(is_clippy_missing("clippy is not installed"));
+        assert!(is_clippy_missing("no such subcommand: clippy"));
+        assert!(is_clippy_missing("component 'clippy' is missing"));
+        assert!(is_clippy_missing("rustup component add clippy"));
+        assert!(!is_clippy_missing("some other error"));
+    }
+
+    #[test]
+    fn parse_clippy_output_counts_and_details() {
+        let stdout = r#"{"reason":"compiler-message","message":{"level":"warning","code":{"code":"clippy::needless_return"},"message":"avoid needless return","spans":[{"file_name":"src/lib.rs","line_start":10,"is_primary":true}]}}
+{"reason":"compiler-message","message":{"level":"error","code":{"code":"clippy::panic"},"message":"do not panic","spans":[{"file_name":"src/main.rs","line_start":42,"is_primary":false},{"file_name":"src/main.rs","line_start":43,"is_primary":true}]}}
+{"reason":"compiler-message","message":{"level":"warning","code":{"code":"dead_code"},"message":"unused","spans":[]}}
+{"reason":"compiler-message","message":{"level":"note","code":{"code":"clippy::style"},"message":"note","spans":[]}}"#;
+
+        let output = parse_clippy_output(stdout, false, "0");
+        assert_eq!(output.warnings, 1);
+        assert_eq!(output.errors, 1);
+        assert_eq!(output.warnings_by_lint.get("clippy::needless_return"), Some(&1));
+        assert_eq!(output.details.len(), 2);
+        assert_eq!(output.details[0].file.as_deref(), Some("src/lib.rs"));
+        assert_eq!(output.details[0].line, Some(10));
+        assert_eq!(output.details[1].line, Some(43));
+        // Score calculation: 100 - (1 warning * 2) - (1 error * 10) = 100 - 2 - 10 = 88
+        assert_eq!(output.score, 88.0);
+    }
+
+    #[test]
+    fn parse_clippy_output_adds_synthetic_error_on_failure() {
+        let output = parse_clippy_output("", true, "1");
+        assert_eq!(output.errors, 1);
+        assert_eq!(output.details.len(), 1);
+        assert_eq!(output.details[0].lint, "clippy::driver");
+        assert_eq!(output.details[0].level, "error");
+    }
 }

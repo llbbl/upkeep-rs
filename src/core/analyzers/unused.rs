@@ -334,3 +334,82 @@ fn collect_possibly_unused(items: &[Value], possibly_unused: &mut Vec<String>) {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_machete_output_handles_null() {
+        let (unused, possibly_unused) = parse_machete_output("null").expect("parse");
+        assert!(unused.is_empty());
+        assert!(possibly_unused.is_empty());
+    }
+
+    #[test]
+    fn parse_machete_output_handles_array_schema() {
+        let json = r#"["serde", {"name":"tokio","kind":"dev","confidence":"low"}]"#;
+        let (unused, possibly_unused) = parse_machete_output(json).expect("parse");
+        assert!(possibly_unused.is_empty());
+        assert_eq!(unused.len(), 2);
+        assert_eq!(unused[0].name, "serde");
+        assert_eq!(unused[0].dependency_type, DependencyType::Normal);
+        assert_eq!(unused[0].confidence, Confidence::High);
+        assert_eq!(unused[1].name, "tokio");
+        assert_eq!(unused[1].dependency_type, DependencyType::Dev);
+        assert_eq!(unused[1].confidence, Confidence::Low);
+    }
+
+    #[test]
+    fn parse_machete_output_handles_manifest_schema() {
+        let json = r#"{"manifests":[{"unused_dependencies":["serde"],"unused_dev_dependencies":[{"name":"tokio","kind":"dev","confidence":"medium"}],"unused_build_dependencies":[{"name":"cc","kind":"build"}],"possibly_unused":["rand"]}]}"#;
+        let (unused, possibly_unused) = parse_machete_output(json).expect("parse");
+        assert_eq!(possibly_unused, vec!["rand".to_string()]);
+        assert_eq!(unused.len(), 3);
+        assert_eq!(unused[0].name, "serde");
+        assert_eq!(unused[0].dependency_type, DependencyType::Normal);
+        assert_eq!(unused[1].name, "tokio");
+        assert_eq!(unused[1].dependency_type, DependencyType::Dev);
+        assert_eq!(unused[1].confidence, Confidence::Medium);
+        assert_eq!(unused[2].name, "cc");
+        assert_eq!(unused[2].dependency_type, DependencyType::Build);
+    }
+
+    #[test]
+    fn parse_machete_output_handles_unused_section_schema() {
+        let json = r#"{"unused":{"dependencies":["serde"],"dev_dependencies":[{"name":"tokio"}],"build_dependencies":[{"name":"cc"}]}}"#;
+        let (unused, possibly_unused) = parse_machete_output(json).expect("parse");
+        assert!(possibly_unused.is_empty());
+        assert_eq!(unused.len(), 3);
+        assert_eq!(unused[0].name, "serde");
+        assert_eq!(unused[0].dependency_type, DependencyType::Normal);
+        assert_eq!(unused[1].name, "tokio");
+        assert_eq!(unused[1].dependency_type, DependencyType::Dev);
+        assert_eq!(unused[2].name, "cc");
+        assert_eq!(unused[2].dependency_type, DependencyType::Build);
+    }
+
+    #[test]
+    fn parse_machete_output_rejects_unknown_schema() {
+        let err = parse_machete_output("{\"unexpected\":true}").unwrap_err();
+        assert_eq!(err.code(), ErrorCode::InvalidData);
+        assert!(err
+            .to_string()
+            .contains("cargo machete JSON schema is not recognized"));
+    }
+
+    #[test]
+    fn parse_machete_text_parses_sections() {
+        let text = "Unused dependencies:\n- serde\nUnused dev-dependencies:\n* tokio\nUnused build-dependencies:\ncc\nPossibly unused dependencies:\n- rand\n";
+        let (unused, possibly_unused) = parse_machete_text(text);
+        assert_eq!(unused.len(), 3);
+        assert_eq!(unused[0].name, "serde");
+        assert_eq!(unused[0].dependency_type, DependencyType::Normal);
+        assert_eq!(unused[0].confidence, Confidence::Medium);
+        assert_eq!(unused[1].name, "tokio");
+        assert_eq!(unused[1].dependency_type, DependencyType::Dev);
+        assert_eq!(unused[2].name, "cc");
+        assert_eq!(unused[2].dependency_type, DependencyType::Build);
+        assert_eq!(possibly_unused, vec!["rand".to_string()]);
+    }
+}

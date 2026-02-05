@@ -1,4 +1,5 @@
 use assert_cmd::cargo::cargo_bin_cmd;
+use predicates::prelude::*;
 use serde_json::Value;
 use std::fs;
 
@@ -28,6 +29,33 @@ fn detect_outputs_workspace_false_for_single_package() {
     let json: Value = serde_json::from_str(&output).expect("parse json");
     assert_eq!(json["workspace"], false);
     assert_eq!(json["package"], "detect-test");
+}
+
+#[test]
+fn detect_outputs_human_readable_summary() {
+    let temp_dir = tempfile::tempdir().expect("temp dir");
+    let root = temp_dir.path();
+    let src_dir = root.join("src");
+    fs::create_dir_all(&src_dir).expect("create src");
+
+    fs::write(
+        root.join("Cargo.toml"),
+        "[package]\nname = \"detect-human\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .expect("write Cargo.toml");
+
+    fs::write(src_dir.join("main.rs"), "fn main() {}\n").expect("write main.rs");
+
+    let mut cmd = cargo_bin_cmd!("cargo-upkeep");
+    cmd.current_dir(root)
+        .arg("detect")
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("Workspace: false")
+                .and(predicate::str::contains("Package: detect-human"))
+                .and(predicate::str::contains("Dependencies: 0")),
+        );
 }
 
 #[test]

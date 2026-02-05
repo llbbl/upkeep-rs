@@ -226,3 +226,122 @@ impl DependencyGraph {
         Some(path)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cargo_metadata::MetadataCommand;
+
+    fn vuln_with(severity: Severity) -> Vulnerability {
+        Vulnerability {
+            package: "pkg".to_string(),
+            package_version: "1.0.0".to_string(),
+            advisory_id: "RUSTSEC-0000-0000".to_string(),
+            severity,
+            title: "Example".to_string(),
+            path: vec!["pkg".to_string()],
+            fix_available: false,
+        }
+    }
+
+    #[test]
+    fn map_severity_handles_all_levels() {
+        assert!(matches!(
+            map_severity(Some(RustsecSeverity::Critical)),
+            Severity::Critical
+        ));
+        assert!(matches!(
+            map_severity(Some(RustsecSeverity::High)),
+            Severity::High
+        ));
+        assert!(matches!(
+            map_severity(Some(RustsecSeverity::Medium)),
+            Severity::Moderate
+        ));
+        assert!(matches!(
+            map_severity(Some(RustsecSeverity::Low)),
+            Severity::Low
+        ));
+        assert!(matches!(
+            map_severity(Some(RustsecSeverity::None)),
+            Severity::Low
+        ));
+        assert!(matches!(map_severity(None), Severity::High));
+    }
+
+    #[test]
+    fn summarize_counts_and_totals() {
+        let vulnerabilities = vec![
+            vuln_with(Severity::Critical),
+            vuln_with(Severity::High),
+            vuln_with(Severity::Moderate),
+            vuln_with(Severity::Low),
+            vuln_with(Severity::Low),
+        ];
+
+        let summary = summarize(&vulnerabilities);
+        assert_eq!(summary.critical, 1);
+        assert_eq!(summary.high, 1);
+        assert_eq!(summary.moderate, 1);
+        assert_eq!(summary.low, 2);
+        assert_eq!(summary.total, 5);
+    }
+
+    /// Tests the DependencyGraph::path_to method with various lookup scenarios.
+    ///
+    /// This test relies on the current project's cargo metadata, which means:
+    /// - The project must have a root package (single-crate project or workspace with root)
+    /// - The project should have at least one registry dependency for the exact match test
+    ///
+    /// If these assumptions change (e.g., project becomes a workspace without root),
+    /// the test may need to be updated or use mock metadata.
+    #[test]
+    fn dependency_graph_path_to_handles_matches_and_missing() {
+        let metadata = MetadataCommand::new().exec().expect("metadata");
+        let graph = DependencyGraph::build(&metadata).expect("graph");
+
+        // Test fallback path lookup (using fake source to trigger fallback logic)
+        // This requires a root package to exist
+        let root = metadata.root_package();
+        if let Some(root) = root {
+            let fallback_path = graph
+                .path_to(&root.name, &root.version.to_string(), Some("registry+fake"))
+                .expect("fallback path should find root package");
+            assert_eq!(
+                fallback_path.last().map(String::as_str),
+                Some(root.name.as_str()),
+                "fallback path should end with the root package name"
+            );
+        } else {
+            // Workspace without root package - skip fallback test
+            eprintln!("Skipping fallback path test: no root package in workspace");
+        }
+
+        // Test exact source match (requires at least one registry dependency)
+        let registry_pkg = metadata.packages.iter().find(|pkg| pkg.source.is_some());
+        if let Some(registry_pkg) = registry_pkg {
+            let exact_path = graph
+                .path_to(
+                    &registry_pkg.name,
+                    &registry_pkg.version.to_string(),
+                    registry_pkg.source.as_ref().map(|src| src.repr.as_str()),
+                )
+                .expect("exact path should find registry package");
+            assert_eq!(
+                exact_path.last().map(String::as_str),
+                Some(registry_pkg.name.as_str()),
+                "exact path should end with the registry package name"
+            );
+        } else {
+            // No registry dependencies - skip exact match test
+            eprintln!("Skipping exact match test: no registry dependencies found");
+        }
+
+        // Test missing package (should always work)
+        let missing = graph.path_to("missing-pkg-that-does-not-exist", "0.0.0", None);
+        assert!(
+            missing.is_none(),
+            "path_to should return None for non-existent packages"
+        );
+    }
+}

@@ -298,3 +298,42 @@ fn summarize(packages: &[UnsafePackage]) -> UnsafeSummary {
 
     summary
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_geiger_output_supports_packages_schema() {
+        let json = r#"{"packages":[{"name":"foo","version":"1.0.0","stats":{"functions":{"unsafe":1},"impls":{"unsafe":2},"traits":{"unsafe":0},"blocks":{"unsafe":3},"exprs":{"unsafe":4}}}]}"#;
+        let output = parse_geiger_output(json).expect("parse");
+        assert_eq!(output.summary.total_unsafe, 10);
+        assert_eq!(output.packages[0].name, "foo");
+    }
+
+    #[test]
+    fn parse_geiger_output_supports_crate_stats_schema() {
+        let json = r#"{"crate_stats":[{"id":"bar 0.2.0 (path+file://...)","geiger":{"impls":{"unsafe":1},"blocks":{"unsafe":2}}}]}"#;
+        let output = parse_geiger_output(json).expect("parse");
+        assert_eq!(output.packages[0].name, "bar");
+        assert_eq!(output.packages[0].version, "0.2.0");
+        assert_eq!(output.summary.total_unsafe, 3);
+    }
+
+    #[test]
+    fn parse_geiger_output_supports_top_level_array_schema() {
+        let json = r#"[{"package":{"name":"baz","version":"0.3.0"},"counts":{"unsafe":{"functions":2,"impls":1,"traits":0,"blocks":0,"expressions":1}}}]"#;
+        let output = parse_geiger_output(json).expect("parse");
+        assert_eq!(output.packages[0].name, "baz");
+        assert_eq!(output.packages[0].version, "0.3.0");
+        assert_eq!(output.summary.total_unsafe, 4);
+    }
+
+    #[test]
+    fn parse_geiger_output_rejects_missing_identifiers() {
+        let json = r#"{"packages":[{"stats":{}}]}"#;
+        let err = parse_geiger_output(json).unwrap_err();
+        assert_eq!(err.code(), ErrorCode::InvalidData);
+        assert!(err.to_string().contains("cargo geiger"));
+    }
+}
