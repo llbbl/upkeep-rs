@@ -2,11 +2,11 @@
 name = "cargo-upkeep"
 version = "0.1.0"
 edition = "2021"
-description = "Unified Rust project maintenance CLI"
+description = "Unified Rust project maintenance CLI (cargo subcommand)"
 repository = "https://github.com/llbbl/cargo-upkeep"
 homepage = "https://github.com/llbbl/cargo-upkeep"
 documentation = "https://docs.rs/cargo-upkeep"
-keywords = ["cargo", "dependencies", "security", "maintenance", "audit"]
+keywords = ["cargo", "cargo-subcommand", "dependencies", "security", "maintenance"]
 categories = ["development-tools::cargo-plugins", "command-line-utilities"]
 readme = "README.md"
 license = "MIT"
@@ -34,3 +34,14 @@ assert_cmd = "2.0"
 httpmock = "0.7"
 predicates = "3.0"
 tempfile = "3.0"
+
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/cargo-upkeep-{ target }.tar.gz"
+pkg-fmt = "tgz"
+bin-dir = "."
+
+[[package.metadata.binstall.overrides]]
+target = "x86_64-pc-windows-msvc"
+pkg-url = "{ repo }/releases/download/v{ version }/cargo-upkeep-{ target }.zip"
+pkg-fmt = "zip"
+bin-dir = "target/{ target }/release"
