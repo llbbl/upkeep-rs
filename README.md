@@ -100,15 +100,28 @@ cargo upkeep deps --json
 
 ```json
 {
-  "command": "deps",
-  "outdated": [
+  "total": 10,
+  "outdated": 1,
+  "major": 0,
+  "minor": 1,
+  "patch": 0,
+  "packages": [
     {
       "name": "serde",
+      "alias": null,
       "current": "1.0.197",
       "latest": "1.0.204",
-      "kind": "minor"
+      "required": "^1.0",
+      "update_type": "minor",
+      "dependency_type": "normal"
     }
-  ]
+  ],
+  "skipped": 0,
+  "skipped_packages": [],
+  "warnings": [],
+  "workspace": false,
+  "members": [],
+  "skipped_members": []
 }
 ```
 
@@ -172,6 +185,74 @@ cargo upkeep tree --json
       "name": "clap",
       "version": "4.5.1",
       "direct": true
+    }
+  ]
+}
+```
+
+### unused
+
+Detect unused dependencies using cargo-machete.
+
+Requires cargo-machete to be installed:
+
+```bash
+cargo install cargo-machete
+```
+
+```bash
+cargo upkeep unused --json
+```
+
+```json
+{
+  "unused": [
+    {
+      "name": "some-crate",
+      "dependency_type": "normal",
+      "confidence": "high"
+    }
+  ],
+  "possibly_unused": ["another-crate"]
+}
+```
+
+### unsafe-code
+
+Analyze unsafe code usage in dependencies using cargo-geiger.
+
+Requires cargo-geiger to be installed:
+
+```bash
+cargo install cargo-geiger
+```
+
+```bash
+cargo upkeep unsafe-code --json
+```
+
+```json
+{
+  "summary": {
+    "packages": 5,
+    "unsafe_functions": 10,
+    "unsafe_impls": 2,
+    "unsafe_traits": 0,
+    "unsafe_blocks": 15,
+    "unsafe_expressions": 3,
+    "total_unsafe": 30
+  },
+  "packages": [
+    {
+      "name": "libc",
+      "version": "0.2.155",
+      "package_id": "libc 0.2.155 (registry+https://github.com/rust-lang/crates.io-index)",
+      "unsafe_functions": 10,
+      "unsafe_impls": 2,
+      "unsafe_traits": 0,
+      "unsafe_blocks": 15,
+      "unsafe_expressions": 3,
+      "total_unsafe": 30
     }
   ]
 }

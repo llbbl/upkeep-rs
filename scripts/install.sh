@@ -117,8 +117,34 @@ cleanup() {
 }
 trap cleanup EXIT
 
+checksum_file="${archive}.sha256"
+if [[ "$VERSION" == "latest" ]]; then
+  checksum_url="https://github.com/${REPO}/releases/latest/download/${checksum_file}"
+else
+  checksum_url="https://github.com/${REPO}/releases/download/${VERSION}/${checksum_file}"
+fi
+
 printf 'Downloading %s...\n' "$url"
 curl -fsSL "$url" -o "$tmp_dir/$archive" || fail "download failed"
+
+printf 'Downloading checksum %s...\n' "$checksum_url"
+curl -fsSL "$checksum_url" -o "$tmp_dir/$checksum_file" || fail "checksum download failed"
+
+printf 'Verifying checksum...\n'
+expected_checksum=$(awk '{print $1}' "$tmp_dir/$checksum_file")
+if command -v sha256sum >/dev/null 2>&1; then
+  actual_checksum=$(sha256sum "$tmp_dir/$archive" | awk '{print $1}')
+elif command -v shasum >/dev/null 2>&1; then
+  actual_checksum=$(shasum -a 256 "$tmp_dir/$archive" | awk '{print $1}')
+else
+  fail "no sha256sum or shasum found; cannot verify checksum"
+fi
+
+if [[ "$expected_checksum" != "$actual_checksum" ]]; then
+  fail "checksum mismatch: expected $expected_checksum, got $actual_checksum"
+fi
+printf 'Checksum verified.\n'
+
 tar -xzf "$tmp_dir/$archive" -C "$tmp_dir" || fail "failed to extract archive"
 
 if [[ ! -f "$tmp_dir/$BIN_NAME" ]]; then
