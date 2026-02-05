@@ -1,21 +1,28 @@
-use anyhow::{bail, Context, Result};
 use cargo_metadata::MetadataCommand;
 use serde_json::Value;
 use std::io;
+use std::path::Path;
 use std::path::PathBuf;
 use tokio::process::Command;
 
+use crate::core::analyzers::util::describe_json_schema;
+use crate::core::error::{ErrorCode, Result, UpkeepError};
 use crate::core::output::{DependencyType, UnusedDep, UnusedOutput};
 
 pub async fn run_unused() -> Result<UnusedOutput> {
-    let metadata = MetadataCommand::new()
-        .exec()
-        .context("failed to load cargo metadata")?;
+    let metadata = MetadataCommand::new().exec().map_err(|err| {
+        UpkeepError::context(ErrorCode::Metadata, "failed to load cargo metadata", err)
+    })?;
     let workspace_root = PathBuf::from(&metadata.workspace_root);
 
     let output = run_machete_json(&workspace_root).await?;
-    let stdout = String::from_utf8(output.stdout)
-        .context("cargo machete output was not valid UTF-8")?;
+    let stdout = String::from_utf8(output.stdout).map_err(|err| {
+        UpkeepError::context(
+            ErrorCode::InvalidData,
+            "cargo machete output was not valid UTF-8",
+            err,
+        )
+    })?;
     let (unused, possibly_unused) = parse_machete_output(&stdout)?;
 
     Ok(UnusedOutput {
@@ -24,34 +31,30 @@ pub async fn run_unused() -> Result<UnusedOutput> {
     })
 }
 
-async fn run_machete_json(workspace_root: &PathBuf) -> Result<std::process::Output> {
+async fn run_machete_json(workspace_root: &Path) -> Result<std::process::Output> {
     let output = run_machete(&["machete", "--json"], workspace_root).await?;
-    if output.status.success() {
-        return Ok(output);
+
+    // If the --json flag is not recognized, fall back to plain output
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if is_unknown_json_flag(&stderr) {
+            return run_machete_plain(workspace_root).await;
+        }
     }
 
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    if is_missing_machete(&stderr) {
-        return missing_machete_error();
-    }
-
-    if is_unknown_json_flag(&stderr) {
-        return run_machete_plain(workspace_root).await;
-    }
-
-    if !output.stdout.is_empty() {
-        return Ok(output);
-    }
-
-    let message = stderr.trim();
-    if message.is_empty() {
-        bail!("cargo machete failed with no stderr output");
-    }
-    bail!("cargo machete failed: {message}");
+    handle_machete_output(output)
 }
 
-async fn run_machete_plain(workspace_root: &PathBuf) -> Result<std::process::Output> {
+async fn run_machete_plain(workspace_root: &Path) -> Result<std::process::Output> {
     let output = run_machete(&["machete"], workspace_root).await?;
+    handle_machete_output(output)
+}
+
+/// Shared error handling for machete command output.
+///
+/// Returns `Ok(output)` if the command succeeded or produced stdout.
+/// Returns an appropriate error otherwise.
+fn handle_machete_output(output: std::process::Output) -> Result<std::process::Output> {
     if output.status.success() {
         return Ok(output);
     }
@@ -61,31 +64,48 @@ async fn run_machete_plain(workspace_root: &PathBuf) -> Result<std::process::Out
         return missing_machete_error();
     }
 
+    // Some machete versions exit non-zero but still produce valid output
     if !output.stdout.is_empty() {
         return Ok(output);
     }
 
     let message = stderr.trim();
     if message.is_empty() {
-        bail!("cargo machete failed with no stderr output");
+        return Err(UpkeepError::message(
+            ErrorCode::ExternalCommand,
+            "cargo machete failed with no stderr output",
+        ));
     }
-    bail!("cargo machete failed: {message}");
+    Err(UpkeepError::message(
+        ErrorCode::ExternalCommand,
+        format!("cargo machete failed: {message}"),
+    ))
 }
 
-async fn run_machete(args: &[&str], workspace_root: &PathBuf) -> Result<std::process::Output> {
+async fn run_machete(args: &[&str], workspace_root: &Path) -> Result<std::process::Output> {
     Command::new("cargo")
         .args(args)
         .current_dir(workspace_root)
         .output()
         .await
         .map_err(|err| match err.kind() {
-            io::ErrorKind::NotFound => anyhow::anyhow!("cargo is not installed or not on PATH"),
-            _ => anyhow::anyhow!(err).context("failed to execute cargo machete"),
+            io::ErrorKind::NotFound => UpkeepError::message(
+                ErrorCode::MissingTool,
+                "cargo is not installed or not on PATH",
+            ),
+            _ => UpkeepError::context(
+                ErrorCode::ExternalCommand,
+                "failed to execute cargo machete",
+                err,
+            ),
         })
 }
 
 fn missing_machete_error() -> Result<std::process::Output> {
-    bail!("cargo-machete is not installed. Install it with `cargo install cargo-machete`.")
+    Err(UpkeepError::message(
+        ErrorCode::MissingTool,
+        "cargo-machete is not installed. Install it with `cargo install cargo-machete`.",
+    ))
 }
 
 fn is_missing_machete(stderr: &str) -> bool {
@@ -106,7 +126,10 @@ fn parse_machete_output(stdout: &str) -> Result<(Vec<UnusedDep>, Vec<String>)> {
             return Ok(deps);
         }
         let schema = describe_json_schema(&value);
-        bail!("cargo machete JSON schema is not recognized: {schema}");
+        return Err(UpkeepError::message(
+            ErrorCode::InvalidData,
+            format!("cargo machete JSON schema is not recognized: {schema}"),
+        ));
     }
 
     Ok(parse_machete_text(stdout))
@@ -221,7 +244,10 @@ fn collect_from_key(
     Ok(true)
 }
 
-fn parse_dependency_array(items: &[Value], fallback_type: DependencyType) -> Result<Vec<UnusedDep>> {
+fn parse_dependency_array(
+    items: &[Value],
+    fallback_type: DependencyType,
+) -> Result<Vec<UnusedDep>> {
     let mut deps = Vec::new();
     for item in items {
         match item {
@@ -294,7 +320,9 @@ fn parse_machete_text(stdout: &str) -> (Vec<UnusedDep>, Vec<String>) {
             in_possibly_unused = false;
             continue;
         }
-        if lower.contains("unused build-dependencies") || lower.contains("unused build dependencies") {
+        if lower.contains("unused build-dependencies")
+            || lower.contains("unused build dependencies")
+        {
             current_type = Some(DependencyType::Build);
             in_possibly_unused = false;
             continue;
@@ -339,21 +367,6 @@ fn collect_possibly_unused(items: &[Value], possibly_unused: &mut Vec<String>) {
                 }
             }
             _ => {}
-        }
-    }
-}
-
-fn describe_json_schema(value: &Value) -> String {
-    match value {
-        Value::Null => "null".to_string(),
-        Value::Bool(_) => "boolean".to_string(),
-        Value::Number(_) => "number".to_string(),
-        Value::String(_) => "string".to_string(),
-        Value::Array(items) => format!("array(len={})", items.len()),
-        Value::Object(map) => {
-            let mut keys: Vec<&str> = map.keys().map(String::as_str).collect();
-            keys.sort_unstable();
-            format!("object(keys=[{}])", keys.join(", "))
         }
     }
 }

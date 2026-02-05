@@ -1,9 +1,9 @@
-use anyhow::{bail, Context, Result};
 use cargo_metadata::{DependencyKind, MetadataCommand, PackageId};
 use semver::Version;
 use std::collections::{HashMap, HashSet};
 
 use crate::core::analyzers::crates_io::CratesIoClient;
+use crate::core::error::{ErrorCode, Result, UpkeepError};
 use crate::core::output::{
     print_json, DependencyType, DepsOutput, OutdatedPackage, SkipReason, SkippedDependency,
     UpdateType,
@@ -11,19 +11,24 @@ use crate::core::output::{
 
 pub async fn run(json: bool, include_security: bool) -> Result<()> {
     if include_security {
-        bail!("--security is not implemented yet for deps output");
+        return Err(UpkeepError::message(
+            ErrorCode::InvalidData,
+            "--security is not implemented yet for deps output",
+        ));
     }
 
-    let metadata = MetadataCommand::new()
-        .exec()
-        .context("failed to load cargo metadata")?;
-    let root_package = metadata
-        .root_package()
-        .context("no root package found (virtual workspaces are not supported yet)")?;
-    let resolve = metadata
-        .resolve
-        .as_ref()
-        .context("metadata missing resolve data")?;
+    let metadata = MetadataCommand::new().exec().map_err(|err| {
+        UpkeepError::context(ErrorCode::Metadata, "failed to load cargo metadata", err)
+    })?;
+    let root_package = metadata.root_package().ok_or_else(|| {
+        UpkeepError::message(
+            ErrorCode::InvalidData,
+            "no root package found (virtual workspaces are not supported yet)",
+        )
+    })?;
+    let resolve = metadata.resolve.as_ref().ok_or_else(|| {
+        UpkeepError::message(ErrorCode::InvalidData, "metadata missing resolve data")
+    })?;
 
     let mut packages_by_id: HashMap<PackageId, _> = HashMap::new();
     for package in &metadata.packages {
@@ -34,10 +39,13 @@ pub async fn run(json: bool, include_security: bool) -> Result<()> {
         .nodes
         .iter()
         .find(|node| node.id == root_package.id)
-        .with_context(|| {
-            format!(
-                "root package {} not found in resolve graph",
-                root_package.name
+        .ok_or_else(|| {
+            UpkeepError::message(
+                ErrorCode::InvalidData,
+                format!(
+                    "root package {} not found in resolve graph",
+                    root_package.name
+                ),
             )
         })?;
 
@@ -99,7 +107,9 @@ pub async fn run(json: bool, include_security: bool) -> Result<()> {
     let latest_versions = crates_io
         .fetch_latest_versions(&dependency_names, false)
         .await
-        .context("failed to fetch latest crate versions")?;
+        .map_err(|err| {
+            UpkeepError::context(err.code(), "failed to fetch latest crate versions", err)
+        })?;
 
     let mut packages = Vec::new();
     let mut major = 0;
@@ -154,10 +164,14 @@ pub async fn run(json: bool, include_security: bool) -> Result<()> {
             }
         };
 
-        let latest_version = Version::parse(&latest).with_context(|| {
-            format!(
-                "failed to parse latest version for {}: {}",
-                dep.name, latest
+        let latest_version = Version::parse(&latest).map_err(|err| {
+            UpkeepError::context(
+                ErrorCode::InvalidData,
+                format!(
+                    "failed to parse latest version for {}: {}",
+                    dep.name, latest
+                ),
+                err,
             )
         })?;
 

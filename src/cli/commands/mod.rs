@@ -3,10 +3,11 @@
 mod audit;
 mod deps;
 mod detect;
-mod unused;
 mod tree;
+mod unsafe_code;
+mod unused;
 
-use anyhow::Result;
+use crate::core::error::Result;
 
 use crate::cli::UpkeepCommand;
 
@@ -19,13 +20,8 @@ pub async fn handle(command: UpkeepCommand, json: bool) -> Result<()> {
             tracing::info!("quality not implemented");
             Ok(())
         }
-        UpkeepCommand::Unused => {
-            unused::run(json).await
-        }
-        UpkeepCommand::UnsafeCode => {
-            tracing::info!("unsafe-code not implemented");
-            Ok(())
-        }
+        UpkeepCommand::Unused => unused::run(json).await,
+        UpkeepCommand::UnsafeCode => unsafe_code::run(json).await,
         UpkeepCommand::Tree(args) => tree::run(json, args).await,
     }
 }
@@ -41,10 +37,10 @@ mod tests {
         // Audit requires fetching rustsec advisory database.
         // Deps requires fetching crate info from crates.io.
         // Unused requires cargo-machete to be installed.
+        // Unsafe code requires cargo-geiger to be installed.
         let commands = [
             UpkeepCommand::Detect,
             UpkeepCommand::Quality,
-            UpkeepCommand::UnsafeCode,
             UpkeepCommand::Tree(crate::cli::TreeArgs {
                 depth: Some(0),
                 duplicates: false,

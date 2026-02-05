@@ -1,9 +1,13 @@
-use anyhow::{bail, Context, Result};
-use cargo_metadata::{CargoOpt, DependencyKind, MetadataCommand, PackageId};
+use cargo_metadata::{CargoOpt, DependencyKind, MetadataCommand, Package, PackageId};
 use std::collections::{HashMap, HashSet};
 
 use crate::cli::TreeArgs;
+use crate::core::error::{ErrorCode, Result, UpkeepError};
 use crate::core::output::{print_json, TreeNode, TreeOutput, TreeStats};
+
+/// Maximum recursion depth for tree traversal.
+/// This prevents stack overflow on pathologically deep dependency graphs.
+const MAX_TREE_DEPTH: usize = 1000;
 
 #[derive(Clone)]
 struct Edge {
@@ -12,15 +16,36 @@ struct Edge {
     is_build: bool,
 }
 
+/// Context for tree building operations, grouping related parameters
+/// to avoid passing many arguments through recursive calls.
+struct TreeBuildContext<'a> {
+    graph: &'a HashMap<PackageId, Vec<Edge>>,
+    packages_by_id: &'a HashMap<PackageId, Package>,
+    features_by_id: &'a HashMap<PackageId, Vec<String>>,
+    args: &'a TreeArgs,
+    duplicate_names: &'a HashSet<String>,
+    expanded: HashSet<PackageId>,
+    path: HashSet<PackageId>,
+}
+
 pub async fn run(json: bool, args: TreeArgs) -> Result<()> {
+    let cwd = std::env::current_dir()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| "<unknown>".to_string());
+
     let metadata = MetadataCommand::new()
         .features(CargoOpt::AllFeatures)
         .exec()
-        .context("failed to load cargo metadata")?;
-    let resolve = metadata
-        .resolve
-        .as_ref()
-        .context("metadata missing resolve data")?;
+        .map_err(|err| {
+            UpkeepError::context(
+                ErrorCode::Metadata,
+                format!("failed to load cargo metadata in directory: {cwd}"),
+                err,
+            )
+        })?;
+    let resolve = metadata.resolve.as_ref().ok_or_else(|| {
+        UpkeepError::message(ErrorCode::InvalidData, "metadata missing resolve data")
+    })?;
 
     let mut packages_by_id = HashMap::new();
     let mut versions_by_name: HashMap<String, HashSet<String>> = HashMap::new();
@@ -74,38 +99,40 @@ pub async fn run(json: bool, args: TreeArgs) -> Result<()> {
         forward_graph
     };
 
-    let mut expanded = HashSet::new();
-    let mut path = HashSet::new();
+    let mut ctx = TreeBuildContext {
+        graph: &graph,
+        packages_by_id: &packages_by_id,
+        features_by_id: &features_by_id,
+        args: &args,
+        duplicate_names: &duplicate_names,
+        expanded: HashSet::new(),
+        path: HashSet::new(),
+    };
 
     let root = match invert_target {
-        Some(name) => build_inverted_root(
-            name,
-            &graph,
-            &packages_by_id,
-            &features_by_id,
-            &args,
-            &duplicate_names,
-            &mut expanded,
-            &mut path,
-        )?,
+        Some(name) => build_inverted_root(name, &mut ctx)?,
         None => {
-            let root_package = metadata
-                .root_package()
-                .context("no root package found (virtual workspaces are not supported yet)")?;
-            build_node(
-                &root_package.id,
-                0,
-                false,
-                false,
-                &graph,
-                &packages_by_id,
-                &features_by_id,
-                &args,
-                &duplicate_names,
-                &mut expanded,
-                &mut path,
-            )?
-            .unwrap_or_else(|| TreeNode::empty("root"))
+            // Handle virtual workspaces by creating a synthetic root node
+            match metadata.root_package() {
+                Some(root_package) => build_node(&root_package.id, 0, false, false, &mut ctx)?
+                    .unwrap_or_else(|| TreeNode::empty("root")),
+                None => {
+                    // Virtual workspace: create a synthetic root containing all workspace members
+                    let mut root = TreeNode::virtual_root();
+                    for member_id in &metadata.workspace_members {
+                        if let Some(child) = build_node(member_id, 1, false, false, &mut ctx)? {
+                            root.dependencies.push(child);
+                        }
+                    }
+                    if root.dependencies.is_empty() {
+                        return Err(UpkeepError::message(
+                            ErrorCode::InvalidData,
+                            "no packages found in workspace",
+                        ));
+                    }
+                    root
+                }
+            }
         }
     };
 
@@ -139,73 +166,43 @@ fn invert_graph(graph: &HashMap<PackageId, Vec<Edge>>) -> HashMap<PackageId, Vec
     let mut inverted: HashMap<PackageId, Vec<Edge>> = HashMap::new();
     for (from, children) in graph {
         for child in children {
-            inverted
-                .entry(child.id.clone())
-                .or_default()
-                .push(Edge {
-                    id: from.clone(),
-                    is_dev: child.is_dev,
-                    is_build: child.is_build,
-                });
+            inverted.entry(child.id.clone()).or_default().push(Edge {
+                id: from.clone(),
+                is_dev: child.is_dev,
+                is_build: child.is_build,
+            });
         }
     }
     inverted
 }
 
-#[allow(clippy::too_many_arguments)]
-fn build_inverted_root(
-    name: &str,
-    graph: &HashMap<PackageId, Vec<Edge>>,
-    packages_by_id: &HashMap<PackageId, cargo_metadata::Package>,
-    features_by_id: &HashMap<PackageId, Vec<String>>,
-    args: &TreeArgs,
-    duplicate_names: &HashSet<String>,
-    expanded: &mut HashSet<PackageId>,
-    path: &mut HashSet<PackageId>,
-) -> Result<TreeNode> {
+fn build_inverted_root(name: &str, ctx: &mut TreeBuildContext<'_>) -> Result<TreeNode> {
     let mut matches = Vec::new();
-    for (id, package) in packages_by_id {
+    for (id, package) in ctx.packages_by_id {
         if package.name == name {
             matches.push(id.clone());
         }
     }
 
     if matches.is_empty() {
-        bail!("no package named '{name}' found in metadata");
+        return Err(UpkeepError::message(
+            ErrorCode::InvalidData,
+            format!("no package named '{name}' found in metadata"),
+        ));
     }
 
     if matches.len() == 1 {
-        return build_node(
-            &matches[0],
-            0,
-            false,
-            false,
-            graph,
-            packages_by_id,
-            features_by_id,
-            args,
-            duplicate_names,
-            expanded,
-            path,
-        )?
-        .ok_or_else(|| anyhow::anyhow!("no dependencies to display for {name}"));
+        return build_node(&matches[0], 0, false, false, ctx)?.ok_or_else(|| {
+            UpkeepError::message(
+                ErrorCode::InvalidData,
+                format!("no dependencies to display for {name}"),
+            )
+        });
     }
 
     let mut root = TreeNode::empty(&format!("reverse:{name}"));
     for id in matches {
-        if let Some(child) = build_node(
-            &id,
-            1,
-            false,
-            false,
-            graph,
-            packages_by_id,
-            features_by_id,
-            args,
-            duplicate_names,
-            expanded,
-            path,
-        )? {
+        if let Some(child) = build_node(&id, 1, false, false, ctx)? {
             root.dependencies.push(child);
         }
     }
@@ -213,31 +210,38 @@ fn build_inverted_root(
     Ok(root)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn build_node(
     id: &PackageId,
     depth: usize,
     is_dev: bool,
     is_build: bool,
-    graph: &HashMap<PackageId, Vec<Edge>>,
-    packages_by_id: &HashMap<PackageId, cargo_metadata::Package>,
-    features_by_id: &HashMap<PackageId, Vec<String>>,
-    args: &TreeArgs,
-    duplicate_names: &HashSet<String>,
-    expanded: &mut HashSet<PackageId>,
-    path: &mut HashSet<PackageId>,
+    ctx: &mut TreeBuildContext<'_>,
 ) -> Result<Option<TreeNode>> {
-    let package = packages_by_id
-        .get(id)
-        .with_context(|| format!("package {id} missing from metadata"))?;
+    // Safety limit to prevent stack overflow on pathologically deep graphs
+    if depth > MAX_TREE_DEPTH {
+        return Err(UpkeepError::message(
+            ErrorCode::InvalidData,
+            format!(
+                "dependency tree exceeds maximum depth of {MAX_TREE_DEPTH}; \
+                 possible circular dependency or extremely deep graph"
+            ),
+        ));
+    }
 
-    let duplicate = duplicate_names.contains(&package.name);
+    let package = ctx.packages_by_id.get(id).ok_or_else(|| {
+        UpkeepError::message(
+            ErrorCode::InvalidData,
+            format!("package {id} missing from metadata"),
+        )
+    })?;
+
+    let duplicate = ctx.duplicate_names.contains(&package.name);
     let mut node = TreeNode {
         name: package.name.clone(),
         version: package.version.to_string(),
         package_id: package.id.to_string(),
-        features: if args.features {
-            features_by_id.get(id).cloned().unwrap_or_default()
+        features: if ctx.args.features {
+            ctx.features_by_id.get(id).cloned().unwrap_or_default()
         } else {
             Vec::new()
         },
@@ -247,16 +251,16 @@ fn build_node(
         duplicate,
     };
 
-    if args.depth.map(|limit| depth >= limit).unwrap_or(false) {
-        return Ok(if args.duplicates && !duplicate && depth > 0 {
+    if ctx.args.depth.map(|limit| depth >= limit).unwrap_or(false) {
+        return Ok(if ctx.args.duplicates && !duplicate && depth > 0 {
             None
         } else {
             Some(node)
         });
     }
 
-    if !expanded.insert(id.clone()) {
-        return Ok(if args.duplicates && !duplicate && depth > 0 {
+    if !ctx.expanded.insert(id.clone()) {
+        return Ok(if ctx.args.duplicates && !duplicate && depth > 0 {
             None
         } else {
             Some(node)
@@ -264,15 +268,17 @@ fn build_node(
     }
 
     // Track current path for cycle detection (checked in child loop below)
-    path.insert(id.clone());
+    ctx.path.insert(id.clone());
 
-    let mut children = graph.get(id).cloned().unwrap_or_default();
+    let mut children = ctx.graph.get(id).cloned().unwrap_or_default();
     children.sort_by(|left, right| {
-        let left_name = packages_by_id
+        let left_name = ctx
+            .packages_by_id
             .get(&left.id)
             .map(|pkg| pkg.name.as_str())
             .unwrap_or("~");
-        let right_name = packages_by_id
+        let right_name = ctx
+            .packages_by_id
             .get(&right.id)
             .map(|pkg| pkg.name.as_str())
             .unwrap_or("~");
@@ -280,29 +286,19 @@ fn build_node(
     });
 
     for child in children {
-        if path.contains(&child.id) {
+        if ctx.path.contains(&child.id) {
             continue;
         }
-        if let Some(child_node) = build_node(
-            &child.id,
-            depth + 1,
-            child.is_dev,
-            child.is_build,
-            graph,
-            packages_by_id,
-            features_by_id,
-            args,
-            duplicate_names,
-            expanded,
-            path,
-        )? {
+        if let Some(child_node) =
+            build_node(&child.id, depth + 1, child.is_dev, child.is_build, ctx)?
+        {
             node.dependencies.push(child_node);
         }
     }
 
-    path.remove(id);
+    ctx.path.remove(id);
 
-    if args.duplicates && !duplicate && depth > 0 && node.dependencies.is_empty() {
+    if ctx.args.duplicates && !duplicate && depth > 0 && node.dependencies.is_empty() {
         return Ok(None);
     }
 
@@ -375,7 +371,10 @@ fn render_node(
     lines: &mut Vec<String>,
 ) {
     let connector = if is_last { "`-- " } else { "|-- " };
-    lines.push(format!("{prefix}{connector}{}", format_label(node, show_features)));
+    lines.push(format!(
+        "{prefix}{connector}{}",
+        format_label(node, show_features)
+    ));
 
     let next_prefix = if is_last {
         format!("{prefix}    ")
@@ -415,14 +414,38 @@ fn format_label(node: &TreeNode, show_features: bool) -> String {
     if annotations.is_empty() {
         format!("{}{}", node.name, version_suffix)
     } else {
-        format!("{}{} [{}]", node.name, version_suffix, annotations.join(", "))
+        format!(
+            "{}{} [{}]",
+            node.name,
+            version_suffix,
+            annotations.join(", ")
+        )
     }
 }
 
 impl TreeNode {
+    /// Creates an empty tree node with a given name.
+    /// Used for synthetic nodes like inverted tree roots.
     fn empty(name: &str) -> Self {
         Self {
             name: name.to_string(),
+            version: String::new(),
+            package_id: String::new(),
+            features: Vec::new(),
+            dependencies: Vec::new(),
+            is_dev: false,
+            is_build: false,
+            duplicate: false,
+        }
+    }
+
+    /// Creates a synthetic root node for virtual workspaces.
+    ///
+    /// Virtual workspaces have no root package, so we create a placeholder
+    /// root that contains all workspace members as direct dependencies.
+    fn virtual_root() -> Self {
+        Self {
+            name: "(workspace)".to_string(),
             version: String::new(),
             package_id: String::new(),
             features: Vec::new(),

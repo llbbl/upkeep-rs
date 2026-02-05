@@ -1,4 +1,3 @@
-use anyhow::{Context, Result};
 use cargo_metadata::{Metadata, MetadataCommand, PackageId};
 use rustsec::advisory::Severity as RustsecSeverity;
 use rustsec::database::Database;
@@ -7,19 +6,31 @@ use rustsec::Lockfile;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 
+use crate::core::error::{ErrorCode, Result, UpkeepError};
 use crate::core::output::{AuditOutput, AuditSummary, Severity, Vulnerability};
 
 pub fn run_audit() -> Result<AuditOutput> {
-    let metadata = MetadataCommand::new()
-        .exec()
-        .context("failed to load cargo metadata")?;
+    let metadata = MetadataCommand::new().exec().map_err(|err| {
+        UpkeepError::context(ErrorCode::Metadata, "failed to load cargo metadata", err)
+    })?;
 
     let workspace_root = PathBuf::from(&metadata.workspace_root);
     let lockfile_path = workspace_root.join("Cargo.lock");
-    let lockfile = Lockfile::load(&lockfile_path)
-        .with_context(|| format!("failed to load {}", lockfile_path.display()))?;
+    let lockfile = Lockfile::load(&lockfile_path).map_err(|err| {
+        UpkeepError::context(
+            ErrorCode::Rustsec,
+            format!("failed to load {}", lockfile_path.display()),
+            err,
+        )
+    })?;
 
-    let db = Database::fetch().context("failed to fetch RustSec advisory database")?;
+    let db = Database::fetch().map_err(|err| {
+        UpkeepError::context(
+            ErrorCode::Rustsec,
+            "failed to fetch RustSec advisory database",
+            err,
+        )
+    })?;
     let settings = Settings::default();
     let report = Report::generate(&db, &lockfile, &settings);
 
@@ -103,10 +114,9 @@ struct DependencyGraph {
 
 impl DependencyGraph {
     fn build(metadata: &Metadata) -> Result<Self> {
-        let resolve = metadata
-            .resolve
-            .as_ref()
-            .context("metadata missing resolve data")?;
+        let resolve = metadata.resolve.as_ref().ok_or_else(|| {
+            UpkeepError::message(ErrorCode::InvalidData, "metadata missing resolve data")
+        })?;
 
         let mut packages_by_id = HashMap::new();
         let mut by_name_version = HashMap::new();

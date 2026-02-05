@@ -1,6 +1,5 @@
 #![allow(dead_code)]
 
-use anyhow::{Context, Result};
 use reqwest::Client;
 use semver::Version;
 use serde::Deserialize;
@@ -9,6 +8,7 @@ use std::sync::Arc;
 use tokio::sync::{Mutex, Semaphore};
 use tokio::time::{sleep, Duration};
 
+use crate::core::error::{ErrorCode, Result, UpkeepError};
 #[derive(Debug, Clone)]
 pub struct VersionInfo {
     pub name: String,
@@ -67,18 +67,31 @@ impl CratesIoClient {
     async fn fetch_from_api(&self, name: &str, allow_prerelease: bool) -> Result<VersionInfo> {
         let _permit = self.limiter.acquire().await?;
         let url = format!("https://crates.io/api/v1/crates/{name}");
-        let response = self
-            .http
-            .get(&url)
-            .send()
-            .await
-            .with_context(|| format!("failed to fetch crate info from {url}"))?;
+        let response = self.http.get(&url).send().await.map_err(|err| {
+            UpkeepError::context(
+                ErrorCode::Http,
+                format!("failed to fetch crate info from {url}"),
+                err,
+            )
+        })?;
         let payload: CratesIoResponse = response
             .error_for_status()
-            .with_context(|| format!("HTTP error fetching {name} from crates.io"))?
+            .map_err(|err| {
+                UpkeepError::context(
+                    ErrorCode::Http,
+                    format!("HTTP error fetching {name} from crates.io"),
+                    err,
+                )
+            })?
             .json()
             .await
-            .with_context(|| format!("failed to parse JSON response for {name}"))?;
+            .map_err(|err| {
+                UpkeepError::context(
+                    ErrorCode::Json,
+                    format!("failed to parse JSON response for {name}"),
+                    err,
+                )
+            })?;
 
         // Rate limit: wait 1 second between requests
         sleep(Duration::from_secs(1)).await;

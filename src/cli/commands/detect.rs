@@ -1,4 +1,4 @@
-use anyhow::Result;
+use crate::core::error::{ErrorCode, Result, UpkeepError};
 use cargo_metadata::MetadataCommand;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -6,7 +6,9 @@ use std::path::{Path, PathBuf};
 use crate::core::output::{print_json, DetectOutput};
 
 pub async fn run(json: bool) -> Result<()> {
-    let metadata = MetadataCommand::new().exec()?;
+    let metadata = MetadataCommand::new().exec().map_err(|err| {
+        UpkeepError::context(ErrorCode::Metadata, "failed to load cargo metadata", err)
+    })?;
     let root = PathBuf::from(&metadata.workspace_root);
     let root_package = metadata.root_package();
 

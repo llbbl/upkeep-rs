@@ -1,10 +1,10 @@
 //! Output types and serialization helpers.
 
-#![allow(dead_code)]
-
 use serde::Serialize;
 use std::collections::HashMap;
 use std::fmt;
+
+use crate::core::error::Result;
 
 #[derive(Debug, Serialize)]
 pub struct DetectOutput {
@@ -40,6 +40,12 @@ pub struct DepsOutput {
 pub struct UnusedOutput {
     pub unused: Vec<UnusedDep>,
     pub possibly_unused: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct UnsafeOutput {
+    pub summary: UnsafeSummary,
+    pub packages: Vec<UnsafePackage>,
 }
 
 #[derive(Debug, Serialize)]
@@ -81,6 +87,17 @@ pub struct AuditSummary {
     pub moderate: usize,
     pub low: usize,
     pub total: usize,
+}
+
+#[derive(Debug, Serialize)]
+pub struct UnsafeSummary {
+    pub packages: usize,
+    pub unsafe_functions: usize,
+    pub unsafe_impls: usize,
+    pub unsafe_traits: usize,
+    pub unsafe_blocks: usize,
+    pub unsafe_expressions: usize,
+    pub total_unsafe: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -135,6 +152,19 @@ pub struct UnusedDep {
 }
 
 #[derive(Debug, Serialize)]
+pub struct UnsafePackage {
+    pub name: String,
+    pub version: String,
+    pub package_id: Option<String>,
+    pub unsafe_functions: usize,
+    pub unsafe_impls: usize,
+    pub unsafe_traits: usize,
+    pub unsafe_blocks: usize,
+    pub unsafe_expressions: usize,
+    pub total_unsafe: usize,
+}
+
+#[derive(Debug, Serialize)]
 pub struct SkippedDependency {
     pub name: String,
     pub alias: Option<String>,
@@ -154,12 +184,6 @@ pub struct Vulnerability {
     pub title: String,
     pub path: Vec<String>,
     pub fix_available: bool,
-}
-
-#[derive(Debug, Serialize)]
-pub struct UpkeepError {
-    pub code: String,
-    pub message: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -207,25 +231,11 @@ pub enum Grade {
     F,
 }
 
-pub fn print_json<T: Serialize>(output: &T) -> anyhow::Result<()> {
+pub fn print_json<T: Serialize>(output: &T) -> Result<()> {
     let payload = serde_json::to_string_pretty(output)?;
     println!("{payload}");
     Ok(())
 }
-
-pub fn print_error(error: &UpkeepError) -> anyhow::Result<()> {
-    let payload = serde_json::to_string_pretty(error)?;
-    eprintln!("{payload}");
-    Ok(())
-}
-
-impl fmt::Display for UpkeepError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}: {}", self.code, self.message)
-    }
-}
-
-impl std::error::Error for UpkeepError {}
 
 impl fmt::Display for DetectOutput {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -372,6 +382,41 @@ impl fmt::Display for UnusedOutput {
             for dependency in &self.possibly_unused {
                 writeln!(f, "- {dependency}")?;
             }
+        }
+
+        Ok(())
+    }
+}
+
+impl fmt::Display for UnsafeOutput {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "Packages: {}", self.summary.packages)?;
+        writeln!(f, "Total unsafe: {}", self.summary.total_unsafe)?;
+        writeln!(f, "Unsafe functions: {}", self.summary.unsafe_functions)?;
+        writeln!(f, "Unsafe impls: {}", self.summary.unsafe_impls)?;
+        writeln!(f, "Unsafe traits: {}", self.summary.unsafe_traits)?;
+        writeln!(f, "Unsafe blocks: {}", self.summary.unsafe_blocks)?;
+        writeln!(f, "Unsafe expressions: {}", self.summary.unsafe_expressions)?;
+
+        if self.packages.is_empty() {
+            writeln!(f, "Details: none")?;
+            return Ok(());
+        }
+
+        writeln!(f, "Details:")?;
+        for package in &self.packages {
+            writeln!(
+                f,
+                "- {} {}: unsafe {} (fn {}, impls {}, traits {}, blocks {}, exprs {})",
+                package.name,
+                package.version,
+                package.total_unsafe,
+                package.unsafe_functions,
+                package.unsafe_impls,
+                package.unsafe_traits,
+                package.unsafe_blocks,
+                package.unsafe_expressions
+            )?;
         }
 
         Ok(())

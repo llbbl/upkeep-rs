@@ -1,9 +1,11 @@
 //! Analyzer implementations for project inspection.
 
 pub mod audit;
-pub mod crates_io;
 pub mod clippy;
+pub mod crates_io;
+pub mod unsafe_code;
 pub mod unused;
+pub mod util;
 
 #[cfg(test)]
 mod tests {

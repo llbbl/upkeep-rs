@@ -1,10 +1,10 @@
 #![allow(dead_code)]
 
-use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::process::Command;
 
+use crate::core::error::{ErrorCode, Result, UpkeepError};
 use crate::core::output::{ClippyIssue, ClippyOutput};
 
 #[derive(Debug, Deserialize)]
@@ -42,11 +42,20 @@ pub fn run_clippy() -> Result<ClippyOutput> {
             "--all-features",
         ])
         .output()
-        .context("failed to execute cargo clippy")?;
+        .map_err(|err| {
+            UpkeepError::context(
+                ErrorCode::ExternalCommand,
+                "failed to execute cargo clippy",
+                err,
+            )
+        })?;
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     if !output.status.success() && is_clippy_missing(&stderr) {
-        bail!("clippy is not installed; run `rustup component add clippy`");
+        return Err(UpkeepError::message(
+            ErrorCode::MissingTool,
+            "clippy is not installed; run `rustup component add clippy`",
+        ));
     }
 
     let clippy_failed = !output.status.success();

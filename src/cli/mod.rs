@@ -2,7 +2,7 @@
 
 pub mod commands;
 
-use anyhow::Result;
+use crate::core::error::{ErrorCode, Result, UpkeepError};
 use clap::{Args, Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
@@ -72,7 +72,13 @@ pub struct TreeArgs {
 
 pub fn init_logging(verbose: bool, log_level: Option<&str>) -> Result<()> {
     let filter = match log_level {
-        Some(level) => EnvFilter::try_new(level)?,
+        Some(level) => EnvFilter::try_new(level).map_err(|err| {
+            UpkeepError::context(
+                ErrorCode::Config,
+                format!("invalid log level filter: {level}"),
+                err,
+            )
+        })?,
         None => {
             if verbose {
                 EnvFilter::new("info")
@@ -86,7 +92,12 @@ pub fn init_logging(verbose: bool, log_level: Option<&str>) -> Result<()> {
         .with_env_filter(filter)
         .with_writer(std::io::stderr)
         .try_init()
-        .map_err(|err| anyhow::anyhow!(err))?;
+        .map_err(|err| {
+            UpkeepError::message(
+                ErrorCode::Config,
+                format!("failed to initialize logging: {err}"),
+            )
+        })?;
 
     Ok(())
 }
@@ -143,14 +154,7 @@ mod tests {
 
     #[test]
     fn parses_tree_upkeep_flags() {
-        let cli = Cli::try_parse_from([
-            "cargo-upkeep",
-            "upkeep",
-            "tree",
-            "--depth",
-            "1",
-        ])
-        .unwrap();
+        let cli = Cli::try_parse_from(["cargo-upkeep", "upkeep", "tree", "--depth", "1"]).unwrap();
 
         match cli.command {
             Command::Upkeep(UpkeepCommand::Tree(TreeArgs { depth, .. })) => {
