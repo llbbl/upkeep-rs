@@ -1,4 +1,4 @@
-# /upkeep-quality - Rust Project Health Report
+# /upkeep-rs-quality - Rust Project Health Report
 
 Trigger: User asks about project health or quality assessment.
 
@@ -8,8 +8,8 @@ Goal: Generate a health report, explain the grade, and produce a prioritized act
 1. Run `cargo upkeep quality` to generate the report.
 2. Present the overall grade (A-F) with a metric breakdown.
 3. For each low-scoring metric, suggest concrete improvements:
-   - Dependencies: run `/upkeep-deps`.
-   - Security: run `/upkeep-audit`.
+   - Dependencies: run `/upkeep-rs-deps`.
+   - Security: run `/upkeep-rs-audit`.
    - Clippy: fix warnings.
    - MSRV: add `rust-version` to `Cargo.toml`.
    - Unused deps: remove with `cargo-machete`.

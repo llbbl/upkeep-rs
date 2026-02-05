@@ -1,4 +1,4 @@
-# /upkeep-audit - Rust Security Scanner
+# /upkeep-rs-audit - Rust Security Scanner
 
 Trigger: User asks about security vulnerabilities or wants to audit dependencies.
 

@@ -261,9 +261,9 @@ cargo upkeep unsafe-code --json
 
 Use the companion Claude Code skills for guided workflows:
 
-- `/upkeep-deps`: `skills/upkeep-deps/SKILL.md`
-- `/upkeep-audit`: `skills/upkeep-audit/SKILL.md`
-- `/upkeep-quality`: `skills/upkeep-quality/SKILL.md`
+- `/upkeep-rs-deps`: `skills/upkeep-rs-deps/SKILL.md`
+- `/upkeep-rs-audit`: `skills/upkeep-rs-audit/SKILL.md`
+- `/upkeep-rs-quality`: `skills/upkeep-rs-quality/SKILL.md`
 
 ## Comparison
 

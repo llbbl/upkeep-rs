@@ -1,4 +1,4 @@
-# /upkeep-deps - Rust Dependency Updater
+# /upkeep-rs-deps - Rust Dependency Updater
 
 Trigger: User asks to update dependencies or check outdated crates.
 
