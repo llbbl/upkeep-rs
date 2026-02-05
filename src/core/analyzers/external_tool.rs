@@ -99,8 +99,9 @@ pub fn handle_tool_output(
 /// combined with the tool name.
 pub fn is_missing_subcommand(stderr: &str, tool_name: &str) -> bool {
     let lower = stderr.to_lowercase();
+    let tool_name_lower = tool_name.to_lowercase();
     (lower.contains("no such subcommand") || lower.contains("unknown subcommand"))
-        && lower.contains(tool_name)
+        && lower.contains(&tool_name_lower)
 }
 
 /// Checks if stderr indicates an unknown command-line flag.
@@ -109,8 +110,9 @@ pub fn is_missing_subcommand(stderr: &str, tool_name: &str) -> bool {
 /// combined with the flag name.
 pub fn is_unknown_flag(stderr: &str, flag_name: &str) -> bool {
     let lower = stderr.to_lowercase();
+    let flag_name_lower = flag_name.to_lowercase();
     (lower.contains("unexpected argument") || lower.contains("found argument"))
-        && lower.contains(flag_name)
+        && lower.contains(&flag_name_lower)
 }
 
 #[cfg(test)]

@@ -8,12 +8,13 @@ use crate::core::error::{ErrorCode, Result, UpkeepError};
 use crate::core::output::print_json;
 use crate::core::scorers::quality::{
     score_quality, ClippySummary, DependencyFreshness, MsrvStatus, QualityInputs, SecuritySummary,
+    UnsafeSummary, UnusedSummary,
 };
 
 pub async fn run(json: bool) -> Result<()> {
     let deps_future = deps::analyze(false);
     let audit_future = run_blocking("audit", run_audit);
-    let clippy_future = run_blocking("clippy", run_clippy);
+    let clippy_future = run_clippy();
     let msrv_future = check_msrv();
     let unused_future = run_unused();
     let unsafe_future = run_unsafe();
@@ -72,13 +73,25 @@ pub async fn run(json: bool) -> Result<()> {
         }
     };
 
-    if let Err(err) = unused_result {
-        extra_recommendations.push(format!("Unused dependencies unavailable: {err}"));
-    }
+    let unused = match unused_result {
+        Ok(output) => Some(UnusedSummary {
+            unused_count: output.unused.len(),
+        }),
+        Err(err) => {
+            extra_recommendations.push(format!("Unused dependencies unavailable: {err}"));
+            None
+        }
+    };
 
-    if let Err(err) = unsafe_result {
-        extra_recommendations.push(format!("Unsafe code scan unavailable: {err}"));
-    }
+    let unsafe_code = match unsafe_result {
+        Ok(output) => Some(UnsafeSummary {
+            total_unsafe: output.summary.total_unsafe,
+        }),
+        Err(err) => {
+            extra_recommendations.push(format!("Unsafe code scan unavailable: {err}"));
+            None
+        }
+    };
 
     let msrv = match msrv_result {
         Ok(status) => status,
@@ -91,6 +104,8 @@ pub async fn run(json: bool) -> Result<()> {
     let mut output = score_quality(&QualityInputs {
         dependency_freshness,
         security,
+        unused,
+        unsafe_code,
         clippy,
         msrv,
     });

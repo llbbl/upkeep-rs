@@ -1,5 +1,4 @@
 use reqwest::Client;
-use semver::Version;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -57,7 +56,20 @@ impl CratesIoClient {
         }
 
         for name in pending {
-            let info = self.fetch_from_api(&name, allow_prerelease).await?;
+            // Acquire semaphore first to serialize API access
+            let _permit = self.limiter.acquire().await?;
+
+            // Re-check cache after acquiring semaphore to avoid TOCTOU race condition:
+            // Another task may have populated the cache while we were waiting
+            {
+                let cache = self.cache.lock().await;
+                if let Some(info) = cache.get(&name) {
+                    results.insert(name.clone(), info.clone());
+                    continue;
+                }
+            }
+
+            let info = self.fetch_from_api_inner(&name, allow_prerelease).await?;
             results.insert(name.clone(), info.clone());
             let mut cache = self.cache.lock().await;
             cache.insert(name, info);
@@ -66,9 +78,12 @@ impl CratesIoClient {
         Ok(results)
     }
 
-    async fn fetch_from_api(&self, name: &str, allow_prerelease: bool) -> Result<VersionInfo> {
-        let _permit = self.limiter.acquire().await?;
-
+    /// Internal helper that fetches from API. Caller must hold the semaphore permit.
+    async fn fetch_from_api_inner(
+        &self,
+        name: &str,
+        allow_prerelease: bool,
+    ) -> Result<VersionInfo> {
         // Rate limit: wait 1 second before making the request
         // This ensures we don't exceed crates.io rate limits (1 req/sec)
         sleep(Duration::from_secs(1)).await;
@@ -100,39 +115,27 @@ impl CratesIoClient {
                 )
             })?;
 
-        let mut latest = payload.krate.max_version;
-        let mut latest_stable = payload.krate.max_stable_version;
+        let max_version = payload.krate.max_version;
+        let max_stable_version = payload.krate.max_stable_version;
 
-        if !allow_prerelease {
-            if let Some(version) = latest.as_ref() {
-                if !is_stable(version) {
-                    latest = None;
-                }
-            }
-        }
-
-        if latest_stable.is_none() && !allow_prerelease {
-            latest_stable = latest.clone();
-        }
-
+        // Determine the version to recommend based on prerelease preference
         let selected = if allow_prerelease {
-            latest.clone().or_else(|| latest_stable.clone())
+            // When prereleases are allowed, prefer max_version (which includes prereleases),
+            // falling back to max_stable_version if max_version is somehow missing
+            max_version.clone().or_else(|| max_stable_version.clone())
         } else {
-            latest_stable.clone()
+            // When prereleases are not allowed, prefer max_stable_version.
+            // If no stable version exists (crate only has prereleases), fall back to
+            // the prerelease version rather than returning None - this allows users
+            // to see that an update exists, even if it's a prerelease.
+            max_stable_version.clone().or_else(|| max_version.clone())
         };
 
         Ok(VersionInfo {
             name: name.to_string(),
             latest: selected,
-            latest_stable,
+            latest_stable: max_stable_version,
         })
-    }
-}
-
-fn is_stable(version: &str) -> bool {
-    match Version::parse(version) {
-        Ok(parsed) => parsed.pre.is_empty(),
-        Err(_) => false, // Conservative: don't recommend unparseable versions as stable
     }
 }
 

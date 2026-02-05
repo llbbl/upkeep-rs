@@ -4,10 +4,12 @@ use cargo_metadata::{
 use semver::Version;
 use std::collections::{HashMap, HashSet};
 
+use crate::core::analyzers::audit::run_audit;
 use crate::core::analyzers::crates_io::{CratesIoClient, VersionInfo};
 use crate::core::error::{ErrorCode, Result, UpkeepError};
 use crate::core::output::{
-    print_json, DependencyType, DepsOutput, OutdatedPackage, SkipReason, SkippedDependency,
+    print_json, AuditSummary, DependencyType, DepsOutput, DepsSecurityOutput, DepsSecurityPackage,
+    DepsSecurityVulnerability, OutdatedPackage, Severity, SkipReason, SkippedDependency,
     UpdateType,
 };
 
@@ -22,14 +24,10 @@ pub async fn run(json: bool, include_security: bool) -> Result<()> {
 }
 
 pub async fn analyze(include_security: bool) -> Result<DepsOutput> {
-    if include_security {
-        return Err(UpkeepError::message(
-            ErrorCode::InvalidData,
-            "--security is not implemented yet for deps output",
-        ));
-    }
-
     let metadata = load_metadata()?;
+    // Compute workspace flag before checking for root package to match detect.rs logic:
+    // A workspace exists if there's no root package (virtual workspace) OR multiple members
+    let is_workspace = metadata.root_package().is_none() || metadata.workspace_members.len() > 1;
     let root_package = get_root_package(&metadata)?;
     let resolve = get_resolve(&metadata)?;
     let packages_by_id = build_packages_map(&metadata);
@@ -41,9 +39,17 @@ pub async fn analyze(include_security: bool) -> Result<DepsOutput> {
 
     let (dependency_names, mut skipped_packages, dependencies) =
         partition_dependencies(root_package);
+    let security = if include_security {
+        Some(fetch_security(&dependencies, &resolved_versions).await?)
+    } else {
+        None
+    };
 
-    let (latest_versions, registry_available, warnings) =
+    let (latest_versions, registry_available, mut warnings) =
         fetch_latest_versions(&dependency_names).await;
+    if include_security {
+        warnings.push("security scan covers direct dependencies only".to_string());
+    }
 
     let (packages, major, minor, patch) = process_dependencies(
         dependencies,
@@ -63,7 +69,8 @@ pub async fn analyze(include_security: bool) -> Result<DepsOutput> {
         skipped: skipped_packages.len(),
         skipped_packages,
         warnings,
-        workspace: metadata.workspace_members.len() > 1,
+        security,
+        workspace: is_workspace,
         members: member_names,
         skipped_members,
     })
@@ -371,6 +378,75 @@ fn classify_update(current: &Version, latest: &Version) -> UpdateType {
     } else {
         UpdateType::Patch
     }
+}
+
+async fn fetch_security(
+    dependencies: &[(&Dependency, DependencyType)],
+    resolved_versions: &HashMap<String, Version>,
+) -> Result<DepsSecurityOutput> {
+    let audit_output = tokio::task::spawn_blocking(run_audit)
+        .await
+        .map_err(|err| {
+            UpkeepError::message(ErrorCode::TaskFailed, format!("audit task failed: {err}"))
+        })??;
+
+    let mut vulnerabilities_by_package: HashMap<(String, String), Vec<DepsSecurityVulnerability>> =
+        HashMap::new();
+    for vulnerability in audit_output.vulnerabilities {
+        vulnerabilities_by_package
+            .entry((vulnerability.package, vulnerability.package_version))
+            .or_default()
+            .push(DepsSecurityVulnerability {
+                advisory_id: vulnerability.advisory_id,
+                severity: vulnerability.severity,
+                title: vulnerability.title,
+                fix_available: vulnerability.fix_available,
+            });
+    }
+
+    let mut summary = AuditSummary {
+        critical: 0,
+        high: 0,
+        moderate: 0,
+        low: 0,
+        total: 0,
+    };
+    let mut packages = Vec::new();
+
+    for (dep, dependency_type) in dependencies {
+        let dep_name = dep.name.clone();
+        let dep_key = dep.rename.as_deref().unwrap_or(&dep.name);
+        let current = resolved_versions
+            .get(dep_key)
+            .or_else(|| resolved_versions.get(&dep_name))
+            .map(|version| version.to_string());
+        let Some(current) = current else {
+            continue;
+        };
+
+        if let Some(vulns) = vulnerabilities_by_package.remove(&(dep_name.clone(), current.clone()))
+        {
+            for vuln in &vulns {
+                summary.total += 1;
+                match vuln.severity {
+                    Severity::Critical => summary.critical += 1,
+                    Severity::High => summary.high += 1,
+                    Severity::Moderate => summary.moderate += 1,
+                    Severity::Low => summary.low += 1,
+                }
+            }
+
+            packages.push(DepsSecurityPackage {
+                name: dep_name,
+                alias: dep.rename.clone(),
+                current,
+                dependency_type: *dependency_type,
+                vulnerabilities: vulns,
+            });
+        }
+    }
+
+    Ok(DepsSecurityOutput { summary, packages })
 }
 
 fn is_registry_source(source: Option<&String>) -> bool {

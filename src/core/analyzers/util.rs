@@ -50,7 +50,7 @@ mod tests {
     #[test]
     fn describe_number() {
         assert_eq!(describe_json_schema(&json!(42)), "number");
-        assert_eq!(describe_json_schema(&json!(3.14)), "number");
+        assert_eq!(describe_json_schema(&json!(42.5)), "number");
     }
 
     #[test]

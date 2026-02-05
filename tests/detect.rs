@@ -84,7 +84,7 @@ fn detect_outputs_workspace_true_for_multi_member() {
     assert_eq!(json["workspace"], true);
     assert!(json["members"]
         .as_array()
-        .map_or(false, |members| !members.is_empty()));
+        .is_some_and(|members| !members.is_empty()));
 }
 
 #[test]

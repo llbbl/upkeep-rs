@@ -42,3 +42,17 @@ Global flags:
 
 - Rust 1.70+
 - `cargo build`
+
+### Coverage
+
+Install coverage tooling:
+
+```bash
+cargo install cargo-llvm-cov
+```
+
+Run coverage (LCOV output in `coverage/lcov.info`):
+
+```bash
+./scripts/coverage.sh
+```

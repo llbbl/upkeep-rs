@@ -8,7 +8,7 @@ use crate::core::analyzers::external_tool::{
 };
 use crate::core::analyzers::util::describe_json_schema;
 use crate::core::error::{ErrorCode, Result, UpkeepError};
-use crate::core::output::{DependencyType, UnusedDep, UnusedOutput};
+use crate::core::output::{Confidence, DependencyType, UnusedDep, UnusedOutput};
 
 const MACHETE_CONFIG: ExternalToolConfig<'static> = ExternalToolConfig {
     tool_name: "machete",
@@ -184,10 +184,6 @@ fn collect_from_key(
     Ok(true)
 }
 
-/// Default confidence level for JSON-parsed dependencies.
-/// JSON output from machete is considered high confidence.
-const JSON_DEFAULT_CONFIDENCE: &str = "high";
-
 fn parse_dependency_array(
     items: &[Value],
     fallback_type: DependencyType,
@@ -198,7 +194,7 @@ fn parse_dependency_array(
             Value::String(name) => deps.push(UnusedDep {
                 name: name.clone(),
                 dependency_type: fallback_type,
-                confidence: JSON_DEFAULT_CONFIDENCE.to_string(),
+                confidence: Confidence::High,
             }),
             Value::Object(obj) => {
                 let name = obj
@@ -215,12 +211,12 @@ fn parse_dependency_array(
                     .and_then(|v| v.as_str())
                     .and_then(parse_dependency_type)
                     .unwrap_or(fallback_type);
-                // Extract confidence from JSON if present, otherwise use default
+                // Extract confidence from JSON if present, otherwise use high (JSON default)
                 let confidence = obj
                     .get("confidence")
                     .and_then(|v| v.as_str())
-                    .unwrap_or(JSON_DEFAULT_CONFIDENCE)
-                    .to_string();
+                    .and_then(parse_confidence)
+                    .unwrap_or(Confidence::High);
                 deps.push(UnusedDep {
                     name,
                     dependency_type,
@@ -233,6 +229,15 @@ fn parse_dependency_array(
     Ok(deps)
 }
 
+fn parse_confidence(value: &str) -> Option<Confidence> {
+    match value.to_lowercase().as_str() {
+        "high" => Some(Confidence::High),
+        "medium" => Some(Confidence::Medium),
+        "low" => Some(Confidence::Low),
+        _ => None,
+    }
+}
+
 fn parse_dependency_type(kind: &str) -> Option<DependencyType> {
     match kind {
         "normal" | "dependencies" => Some(DependencyType::Normal),
@@ -241,10 +246,6 @@ fn parse_dependency_type(kind: &str) -> Option<DependencyType> {
         _ => None,
     }
 }
-
-/// Confidence level for text-parsed dependencies.
-/// Text output parsing is less reliable than JSON, so we use medium confidence.
-const TEXT_CONFIDENCE: &str = "medium";
 
 fn parse_machete_text(stdout: &str) -> (Vec<UnusedDep>, Vec<String>) {
     let mut dependencies = Vec::new();
@@ -301,11 +302,20 @@ fn parse_machete_text(stdout: &str) -> (Vec<UnusedDep>, Vec<String>) {
             continue;
         };
 
+        // Text output parsing is less reliable than JSON, so we use medium confidence
         dependencies.push(UnusedDep {
             name,
             dependency_type,
-            confidence: TEXT_CONFIDENCE.to_string(),
+            confidence: Confidence::Medium,
         });
+    }
+
+    // Log if text parsing found no results (helps debug parsing issues)
+    if dependencies.is_empty() && possibly_unused.is_empty() && !stdout.trim().is_empty() {
+        tracing::debug!(
+            "parse_machete_text found no results from non-empty output ({} bytes)",
+            stdout.len()
+        );
     }
 
     (dependencies, possibly_unused)

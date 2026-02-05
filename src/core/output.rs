@@ -32,9 +32,34 @@ pub struct DepsOutput {
     pub skipped: usize,
     pub skipped_packages: Vec<SkippedDependency>,
     pub warnings: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub security: Option<DepsSecurityOutput>,
     pub workspace: bool,
     pub members: Vec<String>,
     pub skipped_members: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DepsSecurityOutput {
+    pub summary: AuditSummary,
+    pub packages: Vec<DepsSecurityPackage>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DepsSecurityPackage {
+    pub name: String,
+    pub alias: Option<String>,
+    pub current: String,
+    pub dependency_type: DependencyType,
+    pub vulnerabilities: Vec<DepsSecurityVulnerability>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DepsSecurityVulnerability {
+    pub advisory_id: String,
+    pub severity: Severity,
+    pub title: String,
+    pub fix_available: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -149,7 +174,7 @@ pub struct OutdatedPackage {
 pub struct UnusedDep {
     pub name: String,
     pub dependency_type: DependencyType,
-    pub confidence: String,
+    pub confidence: Confidence,
 }
 
 #[derive(Debug, Serialize)]
@@ -233,6 +258,31 @@ pub enum Grade {
     F,
 }
 
+/// Confidence level for detection results.
+///
+/// Higher confidence indicates more reliable detection:
+/// - `High`: JSON-parsed output from tools with structured output
+/// - `Medium`: Text-parsed output from tools without structured output
+/// - `Low`: Heuristic-based detection or fallback parsing
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Confidence {
+    High,
+    Medium,
+    Low,
+}
+
+impl fmt::Display for Confidence {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let label = match self {
+            Confidence::High => "high",
+            Confidence::Medium => "medium",
+            Confidence::Low => "low",
+        };
+        write!(f, "{label}")
+    }
+}
+
 pub fn print_json<T: Serialize>(output: &T) -> Result<()> {
     let payload = serde_json::to_string_pretty(output)?;
     println!("{payload}");
@@ -304,6 +354,45 @@ impl fmt::Display for DepsOutput {
         writeln!(f, "Skipped: {}", self.skipped)?;
         if !self.warnings.is_empty() {
             writeln!(f, "Warnings: {}", self.warnings.join("; "))?;
+        }
+        if let Some(security) = &self.security {
+            writeln!(
+                f,
+                "Security: {} vulnerabilities (critical {}, high {}, moderate {}, low {})",
+                security.summary.total,
+                security.summary.critical,
+                security.summary.high,
+                security.summary.moderate,
+                security.summary.low
+            )?;
+            if security.packages.is_empty() {
+                writeln!(f, "Vulnerable dependencies: none")?;
+            } else {
+                writeln!(f, "Vulnerable dependencies:")?;
+                for package in &security.packages {
+                    let display_name = match package.alias.as_deref() {
+                        Some(alias) => format!("{} ({})", alias, package.name),
+                        None => package.name.clone(),
+                    };
+                    for vulnerability in &package.vulnerabilities {
+                        let fix_label = if vulnerability.fix_available {
+                            "fix available"
+                        } else {
+                            "no fix"
+                        };
+                        writeln!(
+                            f,
+                            "- {} ({}) current {}: {} ({}, {})",
+                            display_name,
+                            package.dependency_type,
+                            package.current,
+                            vulnerability.advisory_id,
+                            vulnerability.severity,
+                            fix_label
+                        )?;
+                    }
+                }
+            }
         }
         writeln!(f, "Workspace: {}", self.workspace)?;
         if self.workspace {

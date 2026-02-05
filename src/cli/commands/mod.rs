@@ -8,13 +8,17 @@ mod tree;
 mod unsafe_code;
 mod unused;
 
-use crate::core::error::Result;
+use crate::core::error::{ErrorCode, Result, UpkeepError};
 
 use crate::cli::UpkeepCommand;
 
 pub async fn handle(command: UpkeepCommand, json: bool) -> Result<()> {
     match command {
-        UpkeepCommand::Detect => detect::run(json).await,
+        UpkeepCommand::Detect => tokio::task::spawn_blocking(move || detect::run(json))
+            .await
+            .map_err(|err| {
+                UpkeepError::message(ErrorCode::TaskFailed, format!("detect task failed: {err}"))
+            })?,
         UpkeepCommand::Audit => audit::run(json).await,
         UpkeepCommand::Deps { security } => deps::run(json, security).await,
         UpkeepCommand::Quality => quality::run(json).await,

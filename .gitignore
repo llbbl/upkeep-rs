@@ -31,3 +31,6 @@ Thumbs.db
 # Rust build artifacts
 /target
 **/*.rs.bk
+
+# Coverage artifacts
+coverage/

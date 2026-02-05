@@ -7,7 +7,9 @@ use crate::core::output::{print_json, TreeNode, TreeOutput, TreeStats};
 
 /// Maximum recursion depth for tree traversal.
 /// This prevents stack overflow on pathologically deep dependency graphs.
-const MAX_TREE_DEPTH: usize = 1000;
+/// Set to 200 as a conservative limit - typical dependency trees are much shallower,
+/// and deep recursion can exhaust stack space on some platforms.
+const MAX_TREE_DEPTH: usize = 200;
 
 #[derive(Clone)]
 struct Edge {

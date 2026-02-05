@@ -1,8 +1,6 @@
-#![allow(dead_code)]
-
 use serde::Deserialize;
 use std::collections::HashMap;
-use std::process::Command;
+use tokio::process::Command;
 
 use crate::core::error::{ErrorCode, Result, UpkeepError};
 use crate::core::output::{ClippyIssue, ClippyOutput};
@@ -33,7 +31,7 @@ struct DiagnosticSpan {
     is_primary: bool,
 }
 
-pub fn run_clippy() -> Result<ClippyOutput> {
+pub async fn run_clippy() -> Result<ClippyOutput> {
     let output = Command::new("cargo")
         .args([
             "clippy",
@@ -42,6 +40,7 @@ pub fn run_clippy() -> Result<ClippyOutput> {
             "--all-features",
         ])
         .output()
+        .await
         .map_err(|err| {
             UpkeepError::context(
                 ErrorCode::ExternalCommand,

@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 use crate::core::error::{ErrorCode, Result, UpkeepError};
 use crate::core::output::{print_json, DetectOutput};
 
-pub async fn run(json: bool) -> Result<()> {
-    let metadata = load_metadata().await?;
+pub fn run(json: bool) -> Result<()> {
+    let metadata = load_metadata()?;
     let root = PathBuf::from(&metadata.workspace_root);
     let root_package = metadata.root_package();
 
@@ -40,11 +40,7 @@ pub async fn run(json: bool) -> Result<()> {
         edition,
         msrv,
         workspace: is_workspace,
-        members: metadata
-            .workspace_members
-            .iter()
-            .map(|id| id.repr.clone())
-            .collect(),
+        members: collect_member_names(&metadata),
         package,
         version,
         dependencies,
@@ -62,19 +58,25 @@ pub async fn run(json: bool) -> Result<()> {
     }
 }
 
-async fn load_metadata() -> Result<cargo_metadata::Metadata> {
-    tokio::task::spawn_blocking(|| {
-        MetadataCommand::new().exec().map_err(|err| {
-            UpkeepError::context(ErrorCode::Metadata, "failed to load cargo metadata", err)
-        })
+fn load_metadata() -> Result<cargo_metadata::Metadata> {
+    MetadataCommand::new().exec().map_err(|err| {
+        UpkeepError::context(ErrorCode::Metadata, "failed to load cargo metadata", err)
     })
-    .await
-    .map_err(|err| {
-        UpkeepError::message(
-            ErrorCode::TaskFailed,
-            format!("metadata task failed: {err}"),
-        )
-    })?
+}
+
+fn collect_member_names(metadata: &cargo_metadata::Metadata) -> Vec<String> {
+    metadata
+        .workspace_members
+        .iter()
+        .map(|id| {
+            metadata
+                .packages
+                .iter()
+                .find(|pkg| pkg.id == *id)
+                .map(|pkg| pkg.name.clone())
+                .unwrap_or_else(|| id.repr.clone())
+        })
+        .collect()
 }
 
 fn collect_targets(targets: &[cargo_metadata::Target]) -> Vec<String> {

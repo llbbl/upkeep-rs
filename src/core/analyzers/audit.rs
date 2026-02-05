@@ -148,71 +148,76 @@ impl DependencyGraph {
     }
 
     fn path_to(&self, name: &str, version: &str, source: Option<&str>) -> Option<Vec<String>> {
+        // Build lookup keys once, avoiding repeated allocations
+        let name_str = name.to_string();
+        let version_str = version.to_string();
+        let source_str = source.map(str::to_string);
+
         // Try exact match first (with source)
         let target_id = self
             .by_name_version
-            .get(&(
-                name.to_string(),
-                version.to_string(),
-                source.map(str::to_string),
-            ))
-            .cloned()
+            .get(&(name_str.clone(), version_str.clone(), source_str))
             // If no exact match, try without source (crates.io packages may have None source
             // in cargo_metadata but a source string from rustsec lockfile)
             .or_else(|| {
                 self.by_name_version
-                    .get(&(name.to_string(), version.to_string(), None))
-                    .cloned()
+                    .get(&(name_str.clone(), version_str.clone(), None))
             })
             // Also try matching any source with same name/version as fallback
             .or_else(|| {
                 self.by_name_version
                     .iter()
                     .find(|((n, v, _), _)| n == name && v == version)
-                    .map(|(_, id)| id.clone())
+                    .map(|(_, id)| id)
             })?;
 
+        // BFS to find path from any root to target
+        // Use references where possible to reduce cloning
         let mut queue = VecDeque::new();
-        let mut visited = HashSet::new();
-        let mut parents: HashMap<PackageId, PackageId> = HashMap::new();
+        let mut visited: HashSet<&PackageId> = HashSet::new();
+        let mut parents: HashMap<&PackageId, &PackageId> = HashMap::new();
 
         for root in &self.roots {
-            queue.push_back(root.clone());
-            visited.insert(root.clone());
+            queue.push_back(root);
+            visited.insert(root);
         }
 
+        let mut found = false;
         while let Some(node) = queue.pop_front() {
             if node == target_id {
+                found = true;
                 break;
             }
-            if let Some(deps) = self.adjacency.get(&node) {
+            if let Some(deps) = self.adjacency.get(node) {
                 for dep in deps {
-                    if visited.insert(dep.clone()) {
-                        parents.insert(dep.clone(), node.clone());
-                        queue.push_back(dep.clone());
+                    if visited.insert(dep) {
+                        parents.insert(dep, node);
+                        queue.push_back(dep);
                     }
                 }
             }
         }
 
-        if !visited.contains(&target_id) {
+        if !found {
             return None;
         }
 
+        // Reconstruct path from target back to root
         let mut path_ids = Vec::new();
-        let mut current = target_id.clone();
-        path_ids.push(current.clone());
-        while let Some(parent) = parents.get(&current) {
-            path_ids.push(parent.clone());
-            current = parent.clone();
+        let mut current = target_id;
+        path_ids.push(current);
+        while let Some(&parent) = parents.get(current) {
+            path_ids.push(parent);
+            current = parent;
         }
         path_ids.reverse();
 
+        // Convert PackageIds to package names
         let path = path_ids
             .into_iter()
             .map(|id| {
                 self.packages_by_id
-                    .get(&id)
+                    .get(id)
                     .map(|pkg| pkg.name.clone())
                     .unwrap_or_else(|| id.repr.clone())
             })

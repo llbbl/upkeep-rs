@@ -1,6 +1,8 @@
-#![allow(dead_code)]
-
 use crate::core::output::{Grade, MetricScore, QualityOutput};
+
+// === Metric Weights ===
+// These weights determine how much each metric contributes to the overall quality score.
+// They must sum to 1.0 (100%).
 
 pub const WEIGHT_DEPENDENCY_FRESHNESS: f32 = 0.20;
 pub const WEIGHT_SECURITY: f32 = 0.25;
@@ -8,6 +10,23 @@ pub const WEIGHT_UNUSED_DEPS: f32 = 0.15;
 pub const WEIGHT_UNSAFE_CODE: f32 = 0.15;
 pub const WEIGHT_CLIPPY: f32 = 0.15;
 pub const WEIGHT_MSRV: f32 = 0.10;
+
+// === Security Penalty Multipliers ===
+// These values define how much each severity level reduces the security score.
+// The penalties are designed to reflect the urgency of addressing issues:
+// - Critical vulnerabilities have immediate exploitation risk and should block releases
+// - High vulnerabilities have significant impact but may require specific conditions
+// - Moderate vulnerabilities have limited impact or require unusual circumstances
+// - Low vulnerabilities are informational or have minimal impact
+
+/// Points deducted per critical severity vulnerability (25 points each)
+const SECURITY_PENALTY_CRITICAL: u64 = 25;
+/// Points deducted per high severity vulnerability (15 points each)
+const SECURITY_PENALTY_HIGH: u64 = 15;
+/// Points deducted per moderate severity vulnerability (5 points each)
+const SECURITY_PENALTY_MODERATE: u64 = 5;
+/// Points deducted per low severity vulnerability (2 points each)
+const SECURITY_PENALTY_LOW: u64 = 2;
 
 pub struct DependencyFreshness {
     pub total: usize,
@@ -29,12 +48,23 @@ pub struct ClippySummary {
 pub enum MsrvStatus {
     Valid,
     Missing,
+    #[allow(dead_code)] // Will be used when MSRV validation is implemented
     Invalid,
+}
+
+pub struct UnusedSummary {
+    pub unused_count: usize,
+}
+
+pub struct UnsafeSummary {
+    pub total_unsafe: usize,
 }
 
 pub struct QualityInputs {
     pub dependency_freshness: DependencyFreshness,
     pub security: SecuritySummary,
+    pub unused: Option<UnusedSummary>,
+    pub unsafe_code: Option<UnsafeSummary>,
     pub clippy: Option<ClippySummary>,
     pub msrv: MsrvStatus,
 }
@@ -42,8 +72,16 @@ pub struct QualityInputs {
 pub fn score_quality(inputs: &QualityInputs) -> QualityOutput {
     let freshness_score = dependency_freshness_score(&inputs.dependency_freshness);
     let security_score = security_score(&inputs.security);
-    let unused_score = 100.0;
-    let unsafe_score = 100.0;
+    let unused_score = inputs
+        .unused
+        .as_ref()
+        .map(unused_deps_score)
+        .unwrap_or(100.0);
+    let unsafe_score = inputs
+        .unsafe_code
+        .as_ref()
+        .map(unsafe_code_score)
+        .unwrap_or(100.0);
     let clippy_score = inputs.clippy.as_ref().map(clippy_score).unwrap_or(100.0);
     let msrv_score = msrv_score(&inputs.msrv);
 
@@ -107,10 +145,10 @@ fn dependency_freshness_score(input: &DependencyFreshness) -> f32 {
 
 fn security_score(summary: &SecuritySummary) -> f32 {
     let penalty = (summary.critical as u64)
-        .saturating_mul(25)
-        .saturating_add((summary.high as u64).saturating_mul(15))
-        .saturating_add((summary.moderate as u64).saturating_mul(5))
-        .saturating_add((summary.low as u64).saturating_mul(2));
+        .saturating_mul(SECURITY_PENALTY_CRITICAL)
+        .saturating_add((summary.high as u64).saturating_mul(SECURITY_PENALTY_HIGH))
+        .saturating_add((summary.moderate as u64).saturating_mul(SECURITY_PENALTY_MODERATE))
+        .saturating_add((summary.low as u64).saturating_mul(SECURITY_PENALTY_LOW));
     100u64.saturating_sub(penalty) as f32
 }
 
@@ -118,6 +156,23 @@ fn clippy_score(summary: &ClippySummary) -> f32 {
     let penalty = (summary.warnings as u64)
         .saturating_mul(2)
         .saturating_add((summary.errors as u64).saturating_mul(10));
+    100u64.saturating_sub(penalty) as f32
+}
+
+fn unused_deps_score(summary: &UnusedSummary) -> f32 {
+    // Each unused dependency reduces the score by 5 points
+    let penalty = (summary.unused_count as u64).saturating_mul(5);
+    100u64.saturating_sub(penalty) as f32
+}
+
+fn unsafe_code_score(summary: &UnsafeSummary) -> f32 {
+    // Unsafe code has diminishing penalty: first few are more impactful
+    // 0 unsafe = 100, 1-5 = 95-75, 6+ = gradual decline
+    let penalty = match summary.total_unsafe {
+        0 => 0,
+        1..=5 => summary.total_unsafe as u64 * 5,
+        _ => 25 + (summary.total_unsafe.saturating_sub(5) as u64).min(25),
+    };
     100u64.saturating_sub(penalty) as f32
 }
 

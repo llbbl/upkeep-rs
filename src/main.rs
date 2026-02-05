@@ -40,11 +40,3 @@ fn exit_with_error(error: &core::error::UpkeepError, json: bool) -> ExitCode {
     }
     ExitCode::from(1)
 }
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn main_module_smoke() {
-        assert!(true);
-    }
-}

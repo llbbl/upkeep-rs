@@ -26,47 +26,65 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    #[command(subcommand)]
+    #[command(subcommand, about = "Run upkeep subcommands")]
     Upkeep(UpkeepCommand),
+    #[command(about = "Detect workspace, tooling, and CI")]
     Detect,
+    #[command(about = "Report RustSec vulnerabilities")]
     Audit,
     Deps {
-        #[arg(long)]
+        #[arg(long, help = "Include security advisories in deps output")]
         security: bool,
     },
+    #[command(about = "Compute project quality score")]
     Quality,
+    #[command(about = "Find unused dependencies")]
     Unused,
-    #[command(name = "unsafe-code", alias = "unsafe")]
+    #[command(
+        name = "unsafe-code",
+        alias = "unsafe",
+        about = "Report unsafe code usage"
+    )]
     UnsafeCode,
+    #[command(about = "Render dependency tree with filters")]
     Tree(TreeArgs),
 }
 
 #[derive(Debug, Subcommand)]
 pub enum UpkeepCommand {
+    #[command(about = "Detect workspace, tooling, and CI")]
     Detect,
+    #[command(about = "Report RustSec vulnerabilities")]
     Audit,
     Deps {
-        #[arg(long)]
+        #[arg(long, help = "Include security advisories in deps output")]
         security: bool,
     },
+    #[command(about = "Compute project quality score")]
     Quality,
+    #[command(about = "Find unused dependencies")]
     Unused,
-    #[command(name = "unsafe-code", alias = "unsafe")]
+    #[command(
+        name = "unsafe-code",
+        alias = "unsafe",
+        about = "Report unsafe code usage"
+    )]
     UnsafeCode,
+    #[command(about = "Render dependency tree with filters")]
     Tree(TreeArgs),
 }
 
 #[derive(Debug, Args)]
 pub struct TreeArgs {
-    #[arg(long)]
+    #[arg(long, help = "Limit recursion depth")]
     pub depth: Option<usize>,
-    #[arg(long)]
+    #[arg(long, help = "Only show duplicate crates")]
     pub duplicates: bool,
-    #[arg(long)]
+    #[arg(long, help = "Invert tree to show reverse dependencies")]
     pub invert: Option<String>,
-    #[arg(long)]
+    #[arg(long, help = "Include enabled features")]
     pub features: bool,
-    #[arg(long = "no-dev")]
+    #[arg(long = "no-dev", help = "Exclude dev-dependencies")]
     pub no_dev: bool,
 }
 
