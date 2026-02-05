@@ -207,7 +207,7 @@ mod tests {
         let info = result.get("serde").expect("serde info");
         assert_eq!(info.latest.as_deref(), Some("2.0.0-beta.1"));
         assert_eq!(info.latest_stable.as_deref(), Some("1.0.190"));
-        mock.assert_hits(1);
+        mock.assert_calls(1);
     }
 
     #[tokio::test]
@@ -232,7 +232,7 @@ mod tests {
         let info = result.get("tokio").expect("tokio info");
         assert_eq!(info.latest.as_deref(), Some("1.35.1"));
         assert_eq!(info.latest_stable.as_deref(), Some("1.35.1"));
-        mock.assert_hits(1);
+        mock.assert_calls(1);
     }
 
     #[tokio::test]
@@ -257,7 +257,7 @@ mod tests {
         let info = result.get("alpha-only").expect("alpha-only info");
         assert_eq!(info.latest.as_deref(), Some("1.2.3-beta.1"));
         assert_eq!(info.latest_stable, None);
-        mock.assert_hits(1);
+        mock.assert_calls(1);
     }
 
     #[tokio::test]
@@ -282,7 +282,7 @@ mod tests {
         let info = result.get("empty").expect("empty info");
         assert!(info.latest.is_none());
         assert!(info.latest_stable.is_none());
-        mock.assert_hits(1);
+        mock.assert_calls(1);
     }
 
     #[tokio::test]
@@ -313,7 +313,7 @@ mod tests {
             Some("1.2.3")
         );
 
-        mock.assert_hits(1);
+        mock.assert_calls(1);
     }
 
     #[tokio::test]
@@ -333,7 +333,7 @@ mod tests {
         let err = result.unwrap_err();
         assert_eq!(err.code(), crate::core::error::ErrorCode::Http);
         assert!(err.to_string().contains("HTTP error"));
-        mock.assert_hits(1);
+        mock.assert_calls(1);
     }
 
     #[tokio::test]
@@ -352,7 +352,7 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert_eq!(err.code(), crate::core::error::ErrorCode::Http);
-        mock.assert_hits(1);
+        mock.assert_calls(1);
     }
 
     #[tokio::test]
@@ -372,7 +372,7 @@ mod tests {
         let err = result.unwrap_err();
         assert_eq!(err.code(), crate::core::error::ErrorCode::Json);
         assert!(err.to_string().contains("failed to parse JSON"));
-        mock.assert_hits(1);
+        mock.assert_calls(1);
     }
 
     #[tokio::test]

@@ -28,7 +28,7 @@ fn build_output(metadata: &cargo_metadata::Metadata) -> DetectOutput {
             let targets = collect_targets(&pkg.targets);
 
             (
-                Some(pkg.name.clone()),
+                Some(pkg.name.to_string()),
                 Some(pkg.version.to_string()),
                 edition,
                 msrv,
@@ -84,7 +84,7 @@ fn collect_member_names(metadata: &cargo_metadata::Metadata) -> Vec<String> {
                 .packages
                 .iter()
                 .find(|pkg| pkg.id == *id)
-                .map(|pkg| pkg.name.clone())
+                .map(|pkg| pkg.name.to_string())
                 .unwrap_or_else(|| id.repr.clone())
         })
         .collect()
@@ -94,7 +94,7 @@ fn collect_targets(targets: &[cargo_metadata::Target]) -> Vec<String> {
     let mut kinds = BTreeSet::new();
     for target in targets {
         for kind in &target.kind {
-            kinds.insert(kind.clone());
+            kinds.insert(kind.to_string());
         }
     }
     kinds.into_iter().collect()

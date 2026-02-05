@@ -133,16 +133,15 @@ fn cli_quality_command_runs() {
 }
 
 #[test]
-fn cli_audit_command_reports_missing_lockfile() {
+fn cli_audit_command_works_without_lockfile() {
+    // rustsec 0.32+ handles missing lockfiles gracefully
     let temp_dir = create_temp_crate("cli-audit");
     let mut cmd = cargo_bin_cmd!("cargo-upkeep");
     cmd.current_dir(temp_dir.path())
         .args(["audit", "--json"])
         .assert()
-        .failure()
-        .stderr(
-            predicate::str::contains("failed to load").and(predicate::str::contains("Cargo.lock")),
-        );
+        .success()
+        .stdout(predicate::str::contains("\"vulnerabilities\""));
 }
 
 #[test]

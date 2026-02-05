@@ -122,7 +122,11 @@ impl DependencyGraph {
         let mut by_name_version = HashMap::new();
         for package in &metadata.packages {
             let source = package.source.as_ref().map(|src| src.to_string());
-            let key = (package.name.clone(), package.version.to_string(), source);
+            let key = (
+                package.name.to_string(),
+                package.version.to_string(),
+                source,
+            );
             by_name_version.insert(key, package.id.clone());
             packages_by_id.insert(package.id.clone(), package.clone());
         }
@@ -218,7 +222,7 @@ impl DependencyGraph {
             .map(|id| {
                 self.packages_by_id
                     .get(id)
-                    .map(|pkg| pkg.name.clone())
+                    .map(|pkg| pkg.name.to_string())
                     .unwrap_or_else(|| id.repr.clone())
             })
             .collect();

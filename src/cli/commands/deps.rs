@@ -165,8 +165,8 @@ fn build_resolved_versions(
     for node in nodes {
         for dep in &node.deps {
             if let Some(package) = packages_by_id.get(&dep.pkg) {
-                resolved_versions.insert(dep.name.clone(), package.version.clone());
-                resolved_versions.insert(package.name.clone(), package.version.clone());
+                resolved_versions.insert(dep.name.to_string(), package.version.clone());
+                resolved_versions.insert(package.name.to_string(), package.version.clone());
             }
         }
     }
@@ -180,7 +180,7 @@ fn compute_workspace_info(
     let member_names: Vec<String> = metadata
         .workspace_members
         .iter()
-        .filter_map(|id| packages_by_id.get(id).map(|pkg| pkg.name.clone()))
+        .filter_map(|id| packages_by_id.get(id).map(|pkg| pkg.name.to_string()))
         .collect();
 
     (member_names, Vec::new())
@@ -204,7 +204,7 @@ fn partition_dependencies<'a>(
             let dependency_type = convert_dependency_kind(dep.kind);
 
             let source = dep.source.as_ref().map(ToString::to_string);
-            if !is_registry_source(dep.source.as_ref()) {
+            if !is_registry_source(source.as_ref()) {
                 // Deduplicate skipped packages by (name, version_req)
                 let key = (dep.name.clone(), dep.req.to_string());
                 if seen_deps.insert(key) {
