@@ -37,9 +37,41 @@ pub struct DepsOutput {
 }
 
 #[derive(Debug, Serialize)]
+pub struct UnusedOutput {
+    pub unused: Vec<UnusedDep>,
+    pub possibly_unused: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
 pub struct AuditOutput {
     pub vulnerabilities: Vec<Vulnerability>,
     pub summary: AuditSummary,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TreeOutput {
+    pub root: TreeNode,
+    pub stats: TreeStats,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TreeNode {
+    pub name: String,
+    pub version: String,
+    pub package_id: String,
+    pub features: Vec<String>,
+    pub dependencies: Vec<TreeNode>,
+    pub is_dev: bool,
+    pub is_build: bool,
+    pub duplicate: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TreeStats {
+    pub total_crates: usize,
+    pub direct_deps: usize,
+    pub transitive_deps: usize,
+    pub duplicate_crates: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -96,6 +128,13 @@ pub struct OutdatedPackage {
 }
 
 #[derive(Debug, Serialize)]
+pub struct UnusedDep {
+    pub name: String,
+    pub dependency_type: DependencyType,
+    pub confidence: String,
+}
+
+#[derive(Debug, Serialize)]
 pub struct SkippedDependency {
     pub name: String,
     pub alias: Option<String>,
@@ -140,7 +179,7 @@ pub enum UpdateType {
     Patch,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone, Copy)]
 #[serde(rename_all = "lowercase")]
 pub enum DependencyType {
     Normal,
@@ -304,6 +343,37 @@ impl fmt::Display for DepsOutput {
                 )?;
             }
         }
+        Ok(())
+    }
+}
+
+impl fmt::Display for UnusedOutput {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "Unused: {}", self.unused.len())?;
+        writeln!(f, "Possibly unused: {}", self.possibly_unused.len())?;
+
+        if self.unused.is_empty() {
+            writeln!(f, "Unused details: none")?;
+        } else {
+            writeln!(f, "Unused details:")?;
+            for dependency in &self.unused {
+                writeln!(
+                    f,
+                    "- {} ({}, confidence {})",
+                    dependency.name, dependency.dependency_type, dependency.confidence
+                )?;
+            }
+        }
+
+        if self.possibly_unused.is_empty() {
+            writeln!(f, "Possibly unused details: none")?;
+        } else {
+            writeln!(f, "Possibly unused details:")?;
+            for dependency in &self.possibly_unused {
+                writeln!(f, "- {dependency}")?;
+            }
+        }
+
         Ok(())
     }
 }

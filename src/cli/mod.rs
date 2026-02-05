@@ -3,7 +3,7 @@
 pub mod commands;
 
 use anyhow::Result;
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
 #[derive(Debug, Parser)]
@@ -38,7 +38,7 @@ pub enum Command {
     Unused,
     #[command(name = "unsafe-code", alias = "unsafe")]
     UnsafeCode,
-    Tree,
+    Tree(TreeArgs),
 }
 
 #[derive(Debug, Subcommand)]
@@ -53,7 +53,21 @@ pub enum UpkeepCommand {
     Unused,
     #[command(name = "unsafe-code", alias = "unsafe")]
     UnsafeCode,
-    Tree,
+    Tree(TreeArgs),
+}
+
+#[derive(Debug, Args, Clone)]
+pub struct TreeArgs {
+    #[arg(long)]
+    pub depth: Option<usize>,
+    #[arg(long)]
+    pub duplicates: bool,
+    #[arg(long)]
+    pub invert: Option<String>,
+    #[arg(long)]
+    pub features: bool,
+    #[arg(long = "no-dev")]
+    pub no_dev: bool,
 }
 
 pub fn init_logging(verbose: bool, log_level: Option<&str>) -> Result<()> {
@@ -79,7 +93,7 @@ pub fn init_logging(verbose: bool, log_level: Option<&str>) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Cli, Command, UpkeepCommand};
+    use super::{Cli, Command, TreeArgs, UpkeepCommand};
     use clap::Parser;
 
     #[test]
@@ -96,6 +110,52 @@ mod tests {
         let cli = Cli::try_parse_from(["cargo-upkeep", "detect"]).unwrap();
         match cli.command {
             Command::Detect => {}
+            _ => panic!("unexpected subcommand"),
+        }
+    }
+
+    #[test]
+    fn parses_tree_flags() {
+        let cli = Cli::try_parse_from([
+            "cargo-upkeep",
+            "tree",
+            "--depth",
+            "2",
+            "--duplicates",
+            "--invert",
+            "serde",
+            "--features",
+            "--no-dev",
+        ])
+        .unwrap();
+
+        match cli.command {
+            Command::Tree(args) => {
+                assert_eq!(args.depth, Some(2));
+                assert!(args.duplicates);
+                assert_eq!(args.invert.as_deref(), Some("serde"));
+                assert!(args.features);
+                assert!(args.no_dev);
+            }
+            _ => panic!("unexpected subcommand"),
+        }
+    }
+
+    #[test]
+    fn parses_tree_upkeep_flags() {
+        let cli = Cli::try_parse_from([
+            "cargo-upkeep",
+            "upkeep",
+            "tree",
+            "--depth",
+            "1",
+        ])
+        .unwrap();
+
+        match cli.command {
+            Command::Upkeep(UpkeepCommand::Tree(TreeArgs { depth, .. })) => {
+                assert_eq!(depth, Some(1));
+            }
             _ => panic!("unexpected subcommand"),
         }
     }

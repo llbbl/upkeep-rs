@@ -19,7 +19,7 @@ async fn main() -> Result<()> {
         cli::Command::Quality => cli::UpkeepCommand::Quality,
         cli::Command::Unused => cli::UpkeepCommand::Unused,
         cli::Command::UnsafeCode => cli::UpkeepCommand::UnsafeCode,
-        cli::Command::Tree => cli::UpkeepCommand::Tree,
+        cli::Command::Tree(args) => cli::UpkeepCommand::Tree(args),
     };
 
     cli::commands::handle(command, cli.json).await
