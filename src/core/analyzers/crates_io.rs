@@ -74,7 +74,13 @@ impl CratesIoClient {
 
         for name in pending {
             // Acquire semaphore first to serialize API access
-            let _permit = self.limiter.acquire().await?;
+            let _permit = self.limiter.acquire().await.map_err(|err| {
+                UpkeepError::context(
+                    ErrorCode::Concurrency,
+                    "rate limiter semaphore closed unexpectedly (this is a bug, please report it)",
+                    err,
+                )
+            })?;
 
             // Re-check cache after acquiring semaphore to avoid TOCTOU race condition:
             // Another task may have populated the cache while we were waiting
@@ -226,6 +232,31 @@ mod tests {
         let info = result.get("tokio").expect("tokio info");
         assert_eq!(info.latest.as_deref(), Some("1.35.1"));
         assert_eq!(info.latest_stable.as_deref(), Some("1.35.1"));
+        mock.assert_hits(1);
+    }
+
+    #[tokio::test]
+    async fn fetch_latest_versions_falls_back_to_prerelease_when_stable_missing() {
+        let server = MockServer::start();
+        let mock = server.mock(|when, then| {
+            when.method(GET).path("/crates/alpha-only");
+            then.status(200).json_body(json!({
+                "crate": {
+                    "max_version": "1.2.3-beta.1",
+                    "max_stable_version": null
+                }
+            }));
+        });
+
+        let client = test_client(server.url(""));
+        let result = client
+            .fetch_latest_versions(&["alpha-only".to_string()], false)
+            .await
+            .expect("fetch");
+
+        let info = result.get("alpha-only").expect("alpha-only info");
+        assert_eq!(info.latest.as_deref(), Some("1.2.3-beta.1"));
+        assert_eq!(info.latest_stable, None);
         mock.assert_hits(1);
     }
 

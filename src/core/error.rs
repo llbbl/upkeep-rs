@@ -216,4 +216,22 @@ mod tests {
         assert_eq!(response.message, "write failed");
         assert_eq!(response.causes, vec!["disk full".to_string()]);
     }
+
+    #[test]
+    fn error_response_serializes_with_code_message_and_causes() {
+        let source = std::io::Error::new(std::io::ErrorKind::Other, "disk full");
+        let err = UpkeepError::context(ErrorCode::Metadata, "metadata read failed", source);
+        let response = ErrorResponse::from(&err);
+        let value = serde_json::to_value(&response).expect("serialize");
+
+        assert_eq!(value["code"], serde_json::Value::String("metadata".into()));
+        assert_eq!(
+            value["message"],
+            serde_json::Value::String("metadata read failed".into())
+        );
+        assert_eq!(
+            value["causes"],
+            serde_json::Value::Array(vec![serde_json::Value::String("disk full".into())])
+        );
+    }
 }

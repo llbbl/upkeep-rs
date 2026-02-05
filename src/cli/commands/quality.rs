@@ -39,8 +39,12 @@ pub async fn run(json: bool) -> Result<()> {
         unsafe_result,
     );
 
+    emit_output(json, &output)
+}
+
+fn emit_output(json: bool, output: &QualityOutput) -> Result<()> {
     if json {
-        print_json(&output)
+        print_json(output)
     } else {
         println!("{output}");
         Ok(())
@@ -149,12 +153,11 @@ async fn check_msrv() -> Result<MsrvStatus> {
         })
     })
     .await?;
-    let root = metadata.root_package().ok_or_else(|| {
-        UpkeepError::message(
-            ErrorCode::InvalidData,
-            "no root package found (virtual workspaces are not supported yet)",
-        )
-    })?;
+
+    // For virtual workspaces (no root package), return Missing for graceful degradation
+    let Some(root) = metadata.root_package() else {
+        return Ok(MsrvStatus::Missing);
+    };
 
     match root.rust_version.as_ref() {
         Some(_) => Ok(MsrvStatus::Valid),
@@ -176,6 +179,8 @@ where
 mod tests {
     use super::{build_quality_output, check_msrv, run_blocking, MsrvStatus};
     use crate::core::error::{ErrorCode, UpkeepError};
+    use crate::core::output::{Grade, MetricScore, QualityOutput};
+    use serde_json::Value;
 
     fn err() -> UpkeepError {
         UpkeepError::message(ErrorCode::TaskFailed, "boom")
@@ -227,6 +232,27 @@ mod tests {
                 "Unused dependencies unavailable: boom".to_string(),
                 "Unsafe code scan unavailable: boom".to_string(),
             ]
+        );
+    }
+
+    #[test]
+    fn emit_output_json_shape() {
+        let output = QualityOutput {
+            score: 92.5,
+            grade: Grade::A,
+            breakdown: vec![MetricScore {
+                name: "Security".to_string(),
+                score: 90.0,
+                weight: 0.25,
+            }],
+            recommendations: vec!["Address advisories".to_string()],
+        };
+
+        let value = serde_json::to_value(&output).expect("serialize");
+        assert_eq!(value["grade"], Value::String("A".into()));
+        assert_eq!(
+            value["breakdown"][0]["name"],
+            Value::String("Security".into())
         );
     }
 }

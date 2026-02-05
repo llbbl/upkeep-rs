@@ -203,9 +203,9 @@ pub struct SkippedDependency {
 
 #[derive(Debug, Serialize)]
 pub struct Vulnerability {
+    pub id: String,
     pub package: String,
     pub package_version: String,
-    pub advisory_id: String,
     pub severity: Severity,
     pub title: String,
     pub path: Vec<String>,
@@ -529,13 +529,13 @@ impl fmt::Display for AuditOutput {
             return Ok(());
         }
 
-        let mut advisory_width = "advisory_id".len();
+        let mut id_width = "id".len();
         let mut package_width = "package".len();
         let mut version_width = "version".len();
         let mut severity_width = "severity".len();
 
         for vulnerability in &self.vulnerabilities {
-            advisory_width = advisory_width.max(vulnerability.advisory_id.len());
+            id_width = id_width.max(vulnerability.id.len());
             package_width = package_width.max(vulnerability.package.len());
             version_width = version_width.max(vulnerability.package_version.len());
             severity_width = severity_width.max(vulnerability.severity.to_string().len());
@@ -544,12 +544,12 @@ impl fmt::Display for AuditOutput {
         writeln!(f, "Details:")?;
         writeln!(
             f,
-            "{:<advisory_width$}  {:<package_width$}  {:<version_width$}  {:<severity_width$}",
-            "advisory_id",
+            "{:<id_width$}  {:<package_width$}  {:<version_width$}  {:<severity_width$}",
+            "id",
             "package",
             "version",
             "severity",
-            advisory_width = advisory_width,
+            id_width = id_width,
             package_width = package_width,
             version_width = version_width,
             severity_width = severity_width
@@ -557,12 +557,12 @@ impl fmt::Display for AuditOutput {
         for vulnerability in &self.vulnerabilities {
             writeln!(
                 f,
-                "{:<advisory_width$}  {:<package_width$}  {:<version_width$}  {:<severity_width$}",
-                vulnerability.advisory_id,
+                "{:<id_width$}  {:<package_width$}  {:<version_width$}  {:<severity_width$}",
+                vulnerability.id,
                 vulnerability.package,
                 vulnerability.package_version,
                 vulnerability.severity,
-                advisory_width = advisory_width,
+                id_width = id_width,
                 package_width = package_width,
                 version_width = version_width,
                 severity_width = severity_width
@@ -698,9 +698,9 @@ mod tests {
 
         let audit = AuditOutput {
             vulnerabilities: vec![Vulnerability {
+                id: "RUSTSEC-0000-0000".to_string(),
                 package: "serde".to_string(),
                 package_version: "1.0.0".to_string(),
-                advisory_id: "RUSTSEC-0000-0000".to_string(),
                 severity: Severity::High,
                 title: "Example".to_string(),
                 path: vec!["root".to_string(), "serde".to_string()],
@@ -853,6 +853,10 @@ mod tests {
         assert_eq!(
             value_at(&audit_value, "vulnerabilities")[0]["severity"],
             Value::String("high".into())
+        );
+        assert_eq!(
+            value_at(&audit_value, "vulnerabilities")[0]["id"],
+            Value::String("RUSTSEC-0000-0000".into())
         );
 
         let deps_value = serde_json::to_value(&deps).unwrap();
@@ -1138,9 +1142,9 @@ mod tests {
 
         let populated = AuditOutput {
             vulnerabilities: vec![Vulnerability {
+                id: "RUSTSEC-0000-0000".to_string(),
                 package: "serde".to_string(),
                 package_version: "1.0.0".to_string(),
-                advisory_id: "RUSTSEC-0000-0000".to_string(),
                 severity: Severity::High,
                 title: "Example".to_string(),
                 path: vec!["root".to_string()],
@@ -1156,7 +1160,7 @@ mod tests {
         };
         let text = format!("{populated}");
         assert!(text.contains("Details:"));
-        assert!(text.contains("advisory_id"));
+        assert!(text.contains("id"));
         assert!(text.contains("RUSTSEC-0000-0000"));
     }
 

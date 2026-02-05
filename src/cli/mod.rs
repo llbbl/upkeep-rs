@@ -33,7 +33,10 @@ pub enum Command {
     #[command(about = "Report RustSec vulnerabilities")]
     Audit,
     Deps {
-        #[arg(long, help = "Include security advisories in deps output")]
+        #[arg(
+            long,
+            help = "Include RustSec advisories for direct workspace deps (requires Cargo.lock)"
+        )]
         security: bool,
     },
     #[command(about = "Compute project quality score")]
@@ -57,7 +60,10 @@ pub enum UpkeepCommand {
     #[command(about = "Report RustSec vulnerabilities")]
     Audit,
     Deps {
-        #[arg(long, help = "Include security advisories in deps output")]
+        #[arg(
+            long,
+            help = "Include RustSec advisories for direct workspace deps (requires Cargo.lock)"
+        )]
         security: bool,
     },
     #[command(about = "Compute project quality score")]

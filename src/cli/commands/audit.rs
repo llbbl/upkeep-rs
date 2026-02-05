@@ -32,6 +32,8 @@ fn map_audit_join_error(err: tokio::task::JoinError) -> UpkeepError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::output::{AuditOutput, AuditSummary, Severity, Vulnerability};
+    use serde_json::Value;
 
     #[tokio::test]
     async fn map_audit_join_error_handles_panic() {
@@ -54,5 +56,58 @@ mod tests {
         let mapped = map_audit_join_error(join_error);
         assert_eq!(mapped.code(), ErrorCode::TaskFailed);
         assert!(mapped.to_string().contains("cancelled"));
+    }
+
+    #[tokio::test]
+    async fn run_with_output_json_shape() {
+        let output = AuditOutput {
+            vulnerabilities: vec![Vulnerability {
+                id: "RUSTSEC-0000-0000".to_string(),
+                package: "serde".to_string(),
+                package_version: "1.0.0".to_string(),
+                severity: Severity::High,
+                title: "Example".to_string(),
+                path: vec!["root".to_string()],
+                fix_available: true,
+            }],
+            summary: AuditSummary {
+                critical: 0,
+                high: 1,
+                moderate: 0,
+                low: 0,
+                total: 1,
+            },
+        };
+
+        run_with_output(
+            true,
+            async { Ok(output) },
+            |output| {
+                let value = serde_json::to_value(output)?;
+                assert_eq!(value["summary"]["total"], Value::Number(1.into()));
+                assert_eq!(
+                    value["vulnerabilities"][0]["severity"],
+                    Value::String("high".into())
+                );
+                Ok(())
+            },
+            |_| Ok(()),
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn run_with_output_propagates_error() {
+        let err = run_with_output(
+            true,
+            async { Err(UpkeepError::message(ErrorCode::TaskFailed, "boom")) },
+            |_: &AuditOutput| Ok(()),
+            |_: &AuditOutput| Ok(()),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(err.code(), ErrorCode::TaskFailed);
     }
 }

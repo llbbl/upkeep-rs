@@ -144,8 +144,12 @@ pub async fn run(json: bool, args: TreeArgs) -> Result<()> {
     let stats = build_stats(&root);
     let output = TreeOutput { root, stats };
 
+    emit_output(json, &args, &output)
+}
+
+fn emit_output(json: bool, args: &TreeArgs, output: &TreeOutput) -> Result<()> {
     if json {
-        print_json(&output)
+        print_json(output)
     } else {
         let rendered = render_tree(&output.root, args.features);
         println!("{rendered}");
@@ -470,5 +474,49 @@ impl TreeNode {
             is_build: false,
             duplicate: false,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::core::output::{TreeNode, TreeOutput, TreeStats};
+    use serde_json::Value;
+
+    #[test]
+    fn emit_output_json_shape() {
+        let output = TreeOutput {
+            root: TreeNode {
+                name: "root".to_string(),
+                version: "0.1.0".to_string(),
+                package_id: "root 0.1.0".to_string(),
+                features: Vec::new(),
+                dependencies: vec![TreeNode {
+                    name: "dep".to_string(),
+                    version: "1.2.3".to_string(),
+                    package_id: "dep 1.2.3".to_string(),
+                    features: Vec::new(),
+                    dependencies: Vec::new(),
+                    is_dev: false,
+                    is_build: false,
+                    duplicate: false,
+                }],
+                is_dev: false,
+                is_build: false,
+                duplicate: false,
+            },
+            stats: TreeStats {
+                total_crates: 2,
+                direct_deps: 1,
+                transitive_deps: 0,
+                duplicate_crates: 0,
+            },
+        };
+
+        let value = serde_json::to_value(&output).expect("serialize");
+        assert_eq!(value["stats"]["direct_deps"], Value::Number(1.into()));
+        assert_eq!(
+            value["root"]["dependencies"][0]["name"],
+            Value::String("dep".into())
+        );
     }
 }

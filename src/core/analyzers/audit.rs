@@ -56,9 +56,9 @@ pub fn run_audit() -> Result<AuditOutput> {
             .unwrap_or_else(|| vec![package_name.clone()]);
 
         vulnerabilities.push(Vulnerability {
+            id: advisory.id.to_string(),
             package: package_name,
             package_version,
-            advisory_id: advisory.id.to_string(),
             severity: map_severity(advisory.cvss.as_ref().map(|c| c.severity())),
             title: advisory.title.to_string(),
             path,
@@ -234,9 +234,9 @@ mod tests {
 
     fn vuln_with(severity: Severity) -> Vulnerability {
         Vulnerability {
+            id: "RUSTSEC-0000-0000".to_string(),
             package: "pkg".to_string(),
             package_version: "1.0.0".to_string(),
-            advisory_id: "RUSTSEC-0000-0000".to_string(),
             severity,
             title: "Example".to_string(),
             path: vec!["pkg".to_string()],
