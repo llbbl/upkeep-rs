@@ -95,6 +95,8 @@ bump-version bump:
   esac
   NEW="$major.$minor.$patch"
   sed -i '' "s/^version = \"$CURRENT\"/version = \"$NEW\"/" Cargo.toml
+  # Regenerate lockfile with new version
+  cargo generate-lockfile
   # Update skill versions
   for skill in skills/upkeep-rs-*/SKILL.md; do
     sed -i '' "s/^version: .*/version: $NEW/" "$skill"
