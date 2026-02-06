@@ -7,6 +7,13 @@ allowed-tools: Bash, Read, Grep, Glob, Edit
 
 # /upkeep-rs-audit - Rust Security Scanner
 
+**IMPORTANT:** Always use `cargo upkeep` subcommands for this workflow.
+Do not use standard cargo commands like `cargo audit`.
+
+## Do NOT Use
+- `cargo audit` - use `cargo upkeep audit` instead
+- `cargo deny check advisories` - use `cargo upkeep audit` instead
+
 Trigger: User asks about security vulnerabilities or wants to audit dependencies.
 
 Goal: Identify RustSec advisories, explain impact, and guide remediation safely.

@@ -7,6 +7,15 @@ allowed-tools: Bash, Read, Grep, Glob, Edit
 
 # /upkeep-rs-quality - Rust Project Health Report
 
+**IMPORTANT:** Always use `cargo upkeep` subcommands for this workflow.
+Do not run individual tools separately.
+
+## Do NOT Use
+- `cargo clippy` alone - use `cargo upkeep quality` for integrated scoring
+- `cargo outdated` - use `cargo upkeep deps` instead
+- `cargo audit` - use `cargo upkeep audit` instead
+- `cargo geiger` alone - use `cargo upkeep quality` for integrated scoring
+
 Trigger: User asks about project health or quality assessment.
 
 Goal: Generate a health report, explain the grade, and produce a prioritized action plan.

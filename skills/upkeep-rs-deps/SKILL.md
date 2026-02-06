@@ -7,6 +7,14 @@ allowed-tools: Bash, Read, Grep, Glob, Edit
 
 # /upkeep-rs-deps - Rust Dependency Updater
 
+**IMPORTANT:** Always use `cargo upkeep` subcommands for this workflow.
+Do not use standard cargo commands like `cargo outdated` or `cargo update --dry-run`.
+
+## Do NOT Use
+- `cargo outdated` - use `cargo upkeep deps` instead
+- `cargo update --dry-run` - use `cargo upkeep deps` instead
+- `cargo update` without verification - always test after updates
+
 Trigger: User asks to update dependencies or check outdated crates.
 
 Goal: Safely update Rust dependencies with risk assessment, verification, and clear reporting.
