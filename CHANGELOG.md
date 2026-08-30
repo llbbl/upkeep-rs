@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.3.2] - 2026-08-30
+
+### Bug Fixes
+
+- **tree:** Preserve shared dependency subtrees
 ## [0.3.1] - 2026-08-30
 
 ### Bug Fixes
