@@ -120,7 +120,8 @@ cargo upkeep deps --json
       "latest": "1.0.204",
       "required": "^1.0",
       "update_type": "minor",
-      "dependency_type": "normal"
+      "dependency_type": "normal",
+      "members": ["my-crate"]
     }
   ],
   "skipped": 0,
@@ -131,6 +132,41 @@ cargo upkeep deps --json
   "skipped_members": []
 }
 ```
+
+Entries are grouped by `(name, current)` and sorted by that pair. Each entry's
+`members` array names the workspace members that declared it, sorted and
+deduplicated; for a single-crate project it holds that crate's own name. A
+workspace whose members resolve one crate to semver-incompatible versions
+therefore produces one entry per resolved version:
+
+```json
+[
+  {
+    "name": "rand",
+    "current": "0.8.5",
+    "required": "^0.8",
+    "members": ["core-lib"]
+  },
+  {
+    "name": "rand",
+    "current": "0.9.2",
+    "required": "^0.9",
+    "members": ["cli-app"]
+  }
+]
+```
+
+When members declare different requirement strings that resolve to the same
+version, `required` and `alias` come from a single representative edge: the one
+with the smallest `(member, required, alias)` tuple. The member name is the first
+key, so entries are attributed to the first member in sorted order; ties on the
+member are broken by **byte order on the requirement string**, not by semver. So
+for one member declaring both `=0.2.100` and `^0.1`, `=0.2.100` wins — `=` is
+`0x3D` and `^` is `0x5E`. If a group spans several dependency kinds,
+`dependency_type` follows the precedence normal > build > dev.
+
+Each entry under `security.packages` carries the same `members` array, so a
+vulnerable version is attributed to the members that actually resolved to it.
 
 ### audit
 
