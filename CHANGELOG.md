@@ -2,21 +2,26 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.3.0] - 2026-08-30
+
+### Bug Fixes
+
+- **deps:** Resolve dependencies per workspace member
+- **deps:** Classify 0.x updates by cargo semver compatibility
+- **lint:** Lint test targets and fix io_other_error
+
+### Features
+
+- **release:** Bump and publish versions automatically
 ## [0.2.0] - 2026-08-30
-
-### Documentation
-
-- **audit:** Document crates.io-only advisory scope
 
 ### Miscellaneous
 
 - Remove beads task tracking
-- Enforce the declared MSRV
 
 ### Security
 
 - **deps:** Bulk dependency update and raise MSRV to 1.96
-- **changelog:** Surface security-relevant dependency updates
 ## [0.1.7] - 2026-02-06
 
 ### Bug Fixes
@@ -27,24 +32,11 @@ All notable changes to this project will be documented in this file.
 ### Bug Fixes
 
 - **ci:** Use --locked and env var for crates.io publish
-## [0.1.5] - 2026-02-06
-
-### Documentation
-
-- **skills:** Add Do NOT Use sections to prevent command confusion
-
-### Miscellaneous
-
-- Automate crates.io publish on release
 ## [0.1.4] - 2026-02-05
 
 ### Security
 
 - **deps:** Update all dependencies to latest versions
-
-### Styling
-
-- Apply cargo fmt
 ## [0.1.3] - 2026-02-05
 
 ### Features
