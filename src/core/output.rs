@@ -253,6 +253,7 @@ pub enum DependencyType {
 pub enum SkipReason {
     NonRegistry,
     MissingResolve,
+    AmbiguousPackageName,
     OptionalNotActivated,
     TargetSpecific,
     RegistryMetadataMissing,
@@ -639,6 +640,7 @@ impl fmt::Display for SkipReason {
         let label = match self {
             SkipReason::NonRegistry => "non_registry",
             SkipReason::MissingResolve => "missing_resolve",
+            SkipReason::AmbiguousPackageName => "ambiguous_package_name",
             SkipReason::OptionalNotActivated => "optional_not_activated",
             SkipReason::TargetSpecific => "target_specific",
             SkipReason::RegistryMetadataMissing => "registry_metadata_missing",

@@ -181,14 +181,36 @@ struct MemberVersions {
     /// the package name, which differs from the lib target name whenever the crate
     /// name contains a dash.
     ///
-    /// Cargo emits `node.deps` in package-id order, which says nothing about whether
-    /// an edge was renamed, so when one package name has several resolved instances
-    /// the first writer here is arbitrary. This map is therefore only a last-resort
-    /// fallback in [`resolve_current_version`], reached after both `by_dep_name`
-    /// lookups miss; a renamed edge never consults it at all.
+    /// When a package name has several resolved versions, the name is recorded in
+    /// `ambiguous_package_names` and is never used as a fallback. This map is only a
+    /// last-resort fallback in [`resolve_current_version`], reached after both
+    /// `by_dep_name` lookups miss; a renamed edge never consults it at all.
     by_package_name: HashMap<String, Version>,
     /// Package names with more than one resolved version are unsafe fallbacks.
     ambiguous_package_names: HashSet<String>,
+}
+
+/// Record one resolved instance, poisoning the package-name fallback when this
+/// member resolves the same package to more than one version.
+fn record_package_version(versions: &mut MemberVersions, package_name: &str, version: &Version) {
+    if versions.ambiguous_package_names.contains(package_name) {
+        return;
+    }
+
+    match versions.by_package_name.get(package_name) {
+        None => {
+            versions
+                .by_package_name
+                .insert(package_name.to_string(), version.clone());
+        }
+        Some(existing) if existing != version => {
+            versions.by_package_name.remove(package_name);
+            versions
+                .ambiguous_package_names
+                .insert(package_name.to_string());
+        }
+        Some(_) => {}
+    }
 }
 
 fn build_resolved_versions(
@@ -212,19 +234,7 @@ fn build_resolved_versions(
                     versions
                         .by_dep_name
                         .insert(dep.name.to_string(), package.version.clone());
-                    let package_name = package.name.to_string();
-                    match versions.by_package_name.get(&package_name).cloned() {
-                        None => {
-                            versions
-                                .by_package_name
-                                .insert(package_name, package.version.clone());
-                        }
-                        Some(existing) if existing != package.version => {
-                            versions.by_package_name.remove(&package_name);
-                            versions.ambiguous_package_names.insert(package_name);
-                        }
-                        Some(_) => {}
-                    }
+                    record_package_version(&mut versions, package.name.as_ref(), &package.version);
                 }
             }
             versions
@@ -430,13 +440,13 @@ fn resolve_dependencies(
         let Some(versions) = member_versions.get(edge.member_index) else {
             // Unreachable while edges are built from the same member slice; treat a
             // desynchronised index as an unresolved edge rather than panicking.
-            skipped.push(unresolved_skip(&edge));
+            skipped.push(unresolved_skip(&edge, None));
             continue;
         };
 
         let Some(current) = resolve_current_version(edge.alias.as_deref(), &edge.name, versions)
         else {
-            skipped.push(unresolved_skip(&edge));
+            skipped.push(unresolved_skip(&edge, Some(versions)));
             continue;
         };
 
@@ -482,11 +492,15 @@ fn resolve_dependencies(
         .collect()
 }
 
-fn unresolved_skip(edge: &DependencyEdge) -> SkippedDependency {
+fn unresolved_skip(edge: &DependencyEdge, versions: Option<&MemberVersions>) -> SkippedDependency {
     let reason = if edge.optional {
         SkipReason::OptionalNotActivated
     } else if edge.target.is_some() {
         SkipReason::TargetSpecific
+    } else if edge.alias.is_none()
+        && versions.is_some_and(|versions| versions.ambiguous_package_names.contains(&edge.name))
+    {
+        SkipReason::AmbiguousPackageName
     } else {
         SkipReason::MissingResolve
     };
@@ -738,8 +752,8 @@ fn is_registry_source(source: Option<&String>) -> bool {
 mod tests {
     use super::{
         classify_update, get_latest_version, is_registry_source, merge_dependency_type,
-        process_dependencies, resolve_current_version, resolve_dependencies, run_with_output,
-        DependencyEdge, MemberVersions, SkippedCollector,
+        process_dependencies, record_package_version, resolve_current_version,
+        resolve_dependencies, run_with_output, DependencyEdge, MemberVersions, SkippedCollector,
     };
     use crate::core::analyzers::crates_io::VersionInfo;
     use crate::core::error::{ErrorCode, UpkeepError};
@@ -770,12 +784,39 @@ mod tests {
             versions
                 .by_dep_name
                 .insert(name.replace('-', "_"), parsed.clone());
-            versions
-                .by_package_name
-                .entry((*name).to_string())
-                .or_insert(parsed);
+            record_package_version(&mut versions, name, &parsed);
         }
         versions
+    }
+
+    #[test]
+    fn record_package_version_poisoning_is_sticky() {
+        let mut versions = MemberVersions::default();
+        let v1 = Version::new(1, 0, 0);
+        let v2 = Version::new(2, 0, 0);
+        let v3 = Version::new(3, 0, 0);
+
+        record_package_version(&mut versions, "crate", &v1);
+        assert_eq!(versions.by_package_name.get("crate"), Some(&v1));
+
+        record_package_version(&mut versions, "crate", &v2);
+        assert!(versions.ambiguous_package_names.contains("crate"));
+        assert!(!versions.by_package_name.contains_key("crate"));
+
+        record_package_version(&mut versions, "crate", &v3);
+        assert!(!versions.by_package_name.contains_key("crate"));
+    }
+
+    #[test]
+    fn record_package_version_does_not_poison_identical_versions() {
+        let mut versions = MemberVersions::default();
+        let version = Version::new(1, 0, 0);
+
+        record_package_version(&mut versions, "crate", &version);
+        record_package_version(&mut versions, "crate", &version);
+
+        assert_eq!(versions.by_package_name.get("crate"), Some(&version));
+        assert!(!versions.ambiguous_package_names.contains("crate"));
     }
 
     /// Register a renamed edge's resolve-graph entry: cargo keys it by the rename and
@@ -1299,6 +1340,28 @@ mod tests {
         assert_eq!(skipped[0].reason, SkipReason::OptionalNotActivated);
         assert_eq!(skipped[1].reason, SkipReason::TargetSpecific);
         assert_eq!(skipped[2].reason, SkipReason::MissingResolve);
+    }
+
+    #[test]
+    fn resolve_dependencies_reports_ambiguous_package_name() {
+        let mut versions = MemberVersions {
+            member: "solo".to_string(),
+            ..MemberVersions::default()
+        };
+        record_package_version(&mut versions, "odd-crate", &Version::new(1, 0, 0));
+        record_package_version(&mut versions, "odd-crate", &Version::new(2, 0, 0));
+
+        let mut skipped = SkippedCollector::new();
+        resolve_dependencies(
+            vec![edge("odd-crate", "^1.0", 0)],
+            &[versions],
+            &mut skipped,
+        );
+
+        assert_eq!(
+            skipped.into_vec()[0].reason,
+            SkipReason::AmbiguousPackageName
+        );
     }
 
     #[test]
