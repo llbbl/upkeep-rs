@@ -1,6 +1,6 @@
 use reqwest::Client;
 use serde::Deserialize;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 use tokio::sync::{Mutex, Semaphore};
 use tokio::time::{sleep, Duration};
@@ -17,10 +17,21 @@ pub struct VersionInfo {
     pub latest_stable: Option<String>,
 }
 
+/// Per-crate outcomes from a registry lookup batch.
+///
+/// HTTP, status, decoding, and shared-infrastructure errors affect only the
+/// names that were not already resolved. The outer [`Result`] is retained for
+/// API compatibility; normal lookup and limiter failures are represented here.
+#[derive(Debug)]
+pub struct VersionLookupBatch {
+    pub versions: HashMap<String, VersionInfo>,
+    pub failures: BTreeMap<String, UpkeepError>,
+}
+
 #[derive(Clone)]
 pub struct CratesIoClient {
     http: Client,
-    cache: Arc<Mutex<HashMap<String, VersionInfo>>>,
+    cache: Arc<Mutex<HashMap<(String, bool), VersionInfo>>>,
     limiter: Arc<Semaphore>,
     base_url: String,
     rate_limit_delay: Duration,
@@ -57,48 +68,67 @@ impl CratesIoClient {
         &self,
         names: &[String],
         allow_prerelease: bool,
-    ) -> Result<HashMap<String, VersionInfo>> {
-        let mut results = HashMap::new();
+    ) -> Result<VersionLookupBatch> {
+        let mut versions = HashMap::new();
+        let mut failures = BTreeMap::new();
         let mut pending = Vec::new();
+        let unique_names: BTreeSet<&String> = names.iter().collect();
 
         {
             let cache = self.cache.lock().await;
-            for name in names {
-                if let Some(info) = cache.get(name) {
-                    results.insert(name.clone(), info.clone());
+            for name in unique_names {
+                let key = (name.clone(), allow_prerelease);
+                if let Some(info) = cache.get(&key) {
+                    versions.insert(name.clone(), info.clone());
                 } else {
                     pending.push(name.clone());
                 }
             }
         }
 
-        for name in pending {
+        let mut pending = pending.into_iter();
+        while let Some(name) = pending.next() {
             // Acquire semaphore first to serialize API access
-            let _permit = self.limiter.acquire().await.map_err(|err| {
-                UpkeepError::context(
-                    ErrorCode::Concurrency,
-                    "rate limiter semaphore closed unexpectedly (this is a bug, please report it)",
-                    err,
-                )
-            })?;
+            let _permit = match self.limiter.acquire().await {
+                Ok(permit) => permit,
+                Err(err) => {
+                    let detail = format!(
+                        "rate limiter semaphore closed unexpectedly (this is a bug, please report it): {err}"
+                    );
+                    for failed_name in std::iter::once(name).chain(pending) {
+                        failures.insert(
+                            failed_name,
+                            UpkeepError::message(ErrorCode::Concurrency, detail.clone()),
+                        );
+                    }
+                    break;
+                }
+            };
 
             // Re-check cache after acquiring semaphore to avoid TOCTOU race condition:
             // Another task may have populated the cache while we were waiting
             {
                 let cache = self.cache.lock().await;
-                if let Some(info) = cache.get(&name) {
-                    results.insert(name.clone(), info.clone());
+                let key = (name.clone(), allow_prerelease);
+                if let Some(info) = cache.get(&key) {
+                    versions.insert(name.clone(), info.clone());
                     continue;
                 }
             }
 
-            let info = self.fetch_from_api_inner(&name, allow_prerelease).await?;
-            results.insert(name.clone(), info.clone());
-            let mut cache = self.cache.lock().await;
-            cache.insert(name, info);
+            match self.fetch_from_api_inner(&name, allow_prerelease).await {
+                Ok(info) => {
+                    versions.insert(name.clone(), info.clone());
+                    let mut cache = self.cache.lock().await;
+                    cache.insert((name, allow_prerelease), info);
+                }
+                Err(err) => {
+                    failures.insert(name, err);
+                }
+            }
         }
 
-        Ok(results)
+        Ok(VersionLookupBatch { versions, failures })
     }
 
     /// Internal helper that fetches from API. Caller must hold the semaphore permit.
@@ -204,7 +234,7 @@ mod tests {
             .await
             .expect("fetch");
 
-        let info = result.get("serde").expect("serde info");
+        let info = result.versions.get("serde").expect("serde info");
         assert_eq!(info.latest.as_deref(), Some("2.0.0-beta.1"));
         assert_eq!(info.latest_stable.as_deref(), Some("1.0.190"));
         mock.assert_calls(1);
@@ -229,7 +259,7 @@ mod tests {
             .await
             .expect("fetch");
 
-        let info = result.get("tokio").expect("tokio info");
+        let info = result.versions.get("tokio").expect("tokio info");
         assert_eq!(info.latest.as_deref(), Some("1.35.1"));
         assert_eq!(info.latest_stable.as_deref(), Some("1.35.1"));
         mock.assert_calls(1);
@@ -254,7 +284,7 @@ mod tests {
             .await
             .expect("fetch");
 
-        let info = result.get("alpha-only").expect("alpha-only info");
+        let info = result.versions.get("alpha-only").expect("alpha-only info");
         assert_eq!(info.latest.as_deref(), Some("1.2.3-beta.1"));
         assert_eq!(info.latest_stable, None);
         mock.assert_calls(1);
@@ -279,7 +309,7 @@ mod tests {
             .await
             .expect("fetch");
 
-        let info = result.get("empty").expect("empty info");
+        let info = result.versions.get("empty").expect("empty info");
         assert!(info.latest.is_none());
         assert!(info.latest_stable.is_none());
         mock.assert_calls(1);
@@ -303,13 +333,17 @@ mod tests {
 
         let first = client.fetch_latest_versions(&names, false).await.unwrap();
         assert_eq!(
-            first.get("cached").unwrap().latest.as_deref(),
+            first.versions.get("cached").unwrap().latest.as_deref(),
             Some("1.2.3")
         );
 
-        let second = client.fetch_latest_versions(&names, false).await.unwrap();
+        let second = client
+            .clone()
+            .fetch_latest_versions(&names, false)
+            .await
+            .unwrap();
         assert_eq!(
-            second.get("cached").unwrap().latest.as_deref(),
+            second.versions.get("cached").unwrap().latest.as_deref(),
             Some("1.2.3")
         );
 
@@ -327,10 +361,10 @@ mod tests {
         let client = test_client(server.url(""));
         let result = client
             .fetch_latest_versions(&["nonexistent".to_string()], false)
-            .await;
+            .await
+            .expect("batch continues");
 
-        assert!(result.is_err());
-        let err = result.unwrap_err();
+        let err = result.failures.get("nonexistent").expect("failure");
         assert_eq!(err.code(), crate::core::error::ErrorCode::Http);
         assert!(err.to_string().contains("HTTP error"));
         mock.assert_calls(1);
@@ -347,10 +381,10 @@ mod tests {
         let client = test_client(server.url(""));
         let result = client
             .fetch_latest_versions(&["broken".to_string()], false)
-            .await;
+            .await
+            .expect("batch continues");
 
-        assert!(result.is_err());
-        let err = result.unwrap_err();
+        let err = result.failures.get("broken").expect("failure");
         assert_eq!(err.code(), crate::core::error::ErrorCode::Http);
         mock.assert_calls(1);
     }
@@ -366,10 +400,10 @@ mod tests {
         let client = test_client(server.url(""));
         let result = client
             .fetch_latest_versions(&["badjson".to_string()], false)
-            .await;
+            .await
+            .expect("batch continues");
 
-        assert!(result.is_err());
-        let err = result.unwrap_err();
+        let err = result.failures.get("badjson").expect("failure");
         assert_eq!(err.code(), crate::core::error::ErrorCode::Json);
         assert!(err.to_string().contains("failed to parse JSON"));
         mock.assert_calls(1);
@@ -381,11 +415,159 @@ mod tests {
         let client = test_client("http://127.0.0.1:1".to_string());
         let result = client
             .fetch_latest_versions(&["anypackage".to_string()], false)
-            .await;
+            .await
+            .expect("batch continues");
 
-        assert!(result.is_err());
-        let err = result.unwrap_err();
+        let err = result.failures.get("anypackage").expect("failure");
         assert_eq!(err.code(), crate::core::error::ErrorCode::Http);
         assert!(err.to_string().contains("failed to fetch crate info"));
+    }
+
+    #[tokio::test]
+    async fn fetch_latest_versions_keeps_successful_siblings_after_http_failure() {
+        let server = MockServer::start();
+        let good = server.mock(|when, then| {
+            when.method(GET).path("/crates/zeta");
+            then.status(200).json_body(json!({
+                "crate": {
+                    "max_version": "2.0.0",
+                    "max_stable_version": "2.0.0"
+                }
+            }));
+        });
+        let bad = server.mock(|when, then| {
+            when.method(GET).path("/crates/alpha");
+            then.status(500).body("Internal Server Error");
+        });
+
+        let client = test_client(server.url(""));
+        let result = client
+            .fetch_latest_versions(
+                &["zeta".to_string(), "alpha".to_string(), "alpha".to_string()],
+                false,
+            )
+            .await
+            .expect("batch continues");
+
+        assert_eq!(result.versions["zeta"].latest.as_deref(), Some("2.0.0"));
+        assert_eq!(result.failures.keys().collect::<Vec<_>>(), vec!["alpha"]);
+        good.assert_calls(1);
+        bad.assert_calls(1);
+    }
+
+    #[tokio::test]
+    async fn fetch_latest_versions_keeps_successful_siblings_after_invalid_json() {
+        let server = MockServer::start();
+        let good = server.mock(|when, then| {
+            when.method(GET).path("/crates/zeta");
+            then.status(200).json_body(json!({
+                "crate": {
+                    "max_version": "1.2.3",
+                    "max_stable_version": "1.2.3"
+                }
+            }));
+        });
+        let bad = server.mock(|when, then| {
+            when.method(GET).path("/crates/alpha");
+            then.status(200).body("not json");
+        });
+
+        let client = test_client(server.url(""));
+        let result = client
+            .fetch_latest_versions(&["zeta".to_string(), "alpha".to_string()], false)
+            .await
+            .expect("batch continues");
+
+        assert!(result.versions.contains_key("zeta"));
+        assert_eq!(result.failures.keys().collect::<Vec<_>>(), vec!["alpha"]);
+        good.assert_calls(1);
+        bad.assert_calls(1);
+    }
+
+    #[tokio::test]
+    async fn cache_separates_prerelease_selection_policy() {
+        let server = MockServer::start();
+        let mock = server.mock(|when, then| {
+            when.method(GET).path("/crates/policy");
+            then.status(200).json_body(json!({
+                "crate": {
+                    "max_version": "2.0.0-beta.1",
+                    "max_stable_version": "1.9.0"
+                }
+            }));
+        });
+        let client = test_client(server.url(""));
+        let names = vec!["policy".to_string()];
+
+        let stable = client.fetch_latest_versions(&names, false).await.unwrap();
+        let prerelease = client.fetch_latest_versions(&names, true).await.unwrap();
+
+        assert_eq!(stable.versions["policy"].latest.as_deref(), Some("1.9.0"));
+        assert_eq!(
+            prerelease.versions["policy"].latest.as_deref(),
+            Some("2.0.0-beta.1")
+        );
+        mock.assert_calls(2);
+    }
+
+    #[tokio::test]
+    async fn concurrent_clones_separate_prerelease_policy() {
+        let server = MockServer::start();
+        let mock = server.mock(|when, then| {
+            when.method(GET).path("/crates/concurrent");
+            then.status(200).json_body(json!({
+                "crate": {
+                    "max_version": "2.0.0-beta.1",
+                    "max_stable_version": "1.9.0"
+                }
+            }));
+        });
+        let client = test_client(server.url(""));
+        let stable_client = client.clone();
+        let prerelease_client = client.clone();
+        let stable_names = vec!["concurrent".to_string()];
+        let prerelease_names = stable_names.clone();
+
+        let (stable, prerelease) = tokio::join!(
+            stable_client.fetch_latest_versions(&stable_names, false),
+            prerelease_client.fetch_latest_versions(&prerelease_names, true)
+        );
+
+        assert_eq!(
+            stable.unwrap().versions["concurrent"].latest.as_deref(),
+            Some("1.9.0")
+        );
+        assert_eq!(
+            prerelease.unwrap().versions["concurrent"].latest.as_deref(),
+            Some("2.0.0-beta.1")
+        );
+        mock.assert_calls(2);
+    }
+
+    #[tokio::test]
+    async fn closed_limiter_retains_cached_success_and_fails_only_pending_names() {
+        let server = MockServer::start();
+        let cached = server.mock(|when, then| {
+            when.method(GET).path("/crates/cached");
+            then.status(200).json_body(json!({
+                "crate": { "max_version": "1.2.3", "max_stable_version": "1.2.3" }
+            }));
+        });
+        let client = test_client(server.url(""));
+        client
+            .fetch_latest_versions(&["cached".to_string()], false)
+            .await
+            .unwrap();
+        client.limiter.close();
+
+        let result = client
+            .fetch_latest_versions(&["pending".to_string(), "cached".to_string()], false)
+            .await
+            .expect("partial batch");
+
+        assert!(result.versions.contains_key("cached"));
+        assert_eq!(result.failures.keys().collect::<Vec<_>>(), vec!["pending"]);
+        assert_eq!(result.failures["pending"].code(), ErrorCode::Concurrency);
+        cached.assert_calls(1);
     }
 }

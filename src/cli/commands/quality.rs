@@ -108,7 +108,9 @@ fn unavailable_from<T>(err: &UpkeepError) -> Availability<T> {
 /// `checked` already accounts for the skips that mean "not applicable" —
 /// `NonRegistry`, `TargetSpecific`, `OptionalNotActivated`. There is no newer
 /// version for a git or path dependency to be behind, so dropping them would
-/// misreport the denominator in the other direction.
+/// misreport the denominator in the other direction. Unsupported registries and
+/// successful responses without version metadata remain unanswered comparisons,
+/// as does a declared dependency missing from Cargo's resolve graph.
 fn dependency_freshness(result: Result<DepsOutput>) -> Availability<DependencyFreshness> {
     let output = match result {
         Ok(output) => output,
@@ -119,13 +121,46 @@ fn dependency_freshness(result: Result<DepsOutput>) -> Availability<DependencyFr
         .skipped_packages
         .iter()
         .any(|skipped| skipped.reason == SkipReason::RegistryUnavailable);
+    let unsupported_registry = output
+        .skipped_packages
+        .iter()
+        .any(|skipped| skipped.reason == SkipReason::UnsupportedRegistry);
+    let registry_metadata_missing = output
+        .skipped_packages
+        .iter()
+        .any(|skipped| skipped.reason == SkipReason::RegistryMetadataMissing);
+    let missing_resolve = output
+        .skipped_packages
+        .iter()
+        .any(|skipped| skipped.reason == SkipReason::MissingResolve);
 
     // `checked == 0` with nothing skipped is a project with no dependencies,
-    // which genuinely scores 100. Only a registry skip makes it unmeasured.
-    if registry_unavailable && output.checked == 0 {
+    // which genuinely scores 100. An unanswered registry comparison makes it
+    // unmeasured instead, whether it failed, lacked metadata, or used a registry
+    // whose API cargo-upkeep does not support.
+    if output.checked == 0
+        && (registry_unavailable
+            || unsupported_registry
+            || registry_metadata_missing
+            || missing_resolve)
+    {
+        let detail = if registry_unavailable
+            && !unsupported_registry
+            && !registry_metadata_missing
+            && !missing_resolve
+        {
+            "the crates.io registry was unavailable"
+        } else if unsupported_registry
+            && !registry_unavailable
+            && !registry_metadata_missing
+            && !missing_resolve
+        {
+            "no supported registry comparison was available"
+        } else {
+            "no supported registry comparison could be completed"
+        };
         return Availability::failed(format!(
-            "the crates.io registry was unavailable; none of the {} declared dependencies \
-             could be checked for newer versions",
+            "{detail}; none of the {} declared dependencies could be checked for newer versions",
             output.total
         ));
     }
@@ -566,6 +601,63 @@ mod tests {
         assert!(!output
             .recommendations
             .contains(&"Update outdated dependencies.".to_string()));
+    }
+
+    #[test]
+    fn build_quality_output_all_unsupported_registries_is_unavailable() {
+        let mut deps = deps_output(2, 0, 0, 0);
+        deps.skipped_packages.push(SkippedDependency {
+            name: "private-crate".to_string(),
+            alias: None,
+            required: "1.0".to_string(),
+            reason: SkipReason::UnsupportedRegistry,
+            dependency_type: DependencyType::Normal,
+            source: Some("registry+https://packages.example.com/index".to_string()),
+            target: Some("cfg(unix)".to_string()),
+        });
+        deps.skipped = deps.skipped_packages.len();
+
+        let output = build_quality_output(
+            Ok(deps),
+            Ok(clean_audit()),
+            Ok(clean_clippy()),
+            Ok(MsrvStatus::Valid),
+            Ok(clean_unused()),
+            Ok(clean_unsafe()),
+        );
+
+        assert_eq!(score_of(&output, METRIC_DEPENDENCY_FRESHNESS), None);
+        let entry = unavailable_entry(&output, METRIC_DEPENDENCY_FRESHNESS);
+        assert_eq!(entry.reason, UnavailableReason::Failed);
+        assert!(entry.detail.contains("no supported registry comparison"));
+        assert!(!output.complete);
+    }
+
+    #[test]
+    fn build_quality_output_all_missing_resolve_is_unavailable() {
+        let mut deps = deps_output(1, 0, 0, 0);
+        deps.skipped_packages.push(SkippedDependency {
+            name: "unresolved".to_string(),
+            alias: None,
+            required: "1.0".to_string(),
+            reason: SkipReason::MissingResolve,
+            dependency_type: DependencyType::Normal,
+            source: None,
+            target: None,
+        });
+        deps.skipped = 1;
+
+        let output = build_quality_output(
+            Ok(deps),
+            Ok(clean_audit()),
+            Ok(clean_clippy()),
+            Ok(MsrvStatus::Valid),
+            Ok(clean_unused()),
+            Ok(clean_unsafe()),
+        );
+
+        assert_eq!(score_of(&output, METRIC_DEPENDENCY_FRESHNESS), None);
+        assert!(!output.complete);
     }
 
     /// A re-declared crate does not manufacture a comparison that never happened.

@@ -50,7 +50,7 @@ pub async fn analyze(include_security: bool) -> Result<DepsOutput> {
         None
     };
 
-    let (latest_versions, registry_available, mut warnings) =
+    let (latest_versions, registry_failures, mut warnings) =
         fetch_latest_versions(&dependency_names).await;
     if include_security {
         warnings.push(
@@ -68,7 +68,7 @@ pub async fn analyze(include_security: bool) -> Result<DepsOutput> {
     } = process_dependencies(
         dependencies,
         &latest_versions,
-        registry_available,
+        &registry_failures,
         &mut skipped,
     )?;
 
@@ -243,13 +243,23 @@ fn compute_workspace_info(
 
 /// Collects skipped dependencies, deduplicating identical reports.
 ///
-/// The same dependency can be declared by several workspace members; when it is
-/// skipped for the same reason each time we only want to report it once.
+/// The same dependency can be declared by several workspace members; only rows
+/// with every non-kind identity field equal are collapsed. Distinct sources or
+/// targets remain visible; dependency kinds merge with normal > build > dev.
 #[derive(Debug, Default)]
 struct SkippedCollector {
-    seen: HashSet<(String, Option<String>, String, SkipReason)>,
+    seen: HashMap<SkippedIdentity, usize>,
     items: Vec<SkippedDependency>,
 }
+
+type SkippedIdentity = (
+    String,
+    Option<String>,
+    String,
+    SkipReason,
+    Option<String>,
+    Option<String>,
+);
 
 impl SkippedCollector {
     fn new() -> Self {
@@ -262,8 +272,16 @@ impl SkippedCollector {
             skipped.alias.clone(),
             skipped.required.clone(),
             skipped.reason,
+            skipped.source.clone(),
+            skipped.target.clone(),
         );
-        if self.seen.insert(key) {
+        if let Some(index) = self.seen.get(&key).copied() {
+            let existing = &mut self.items[index];
+            existing.dependency_type =
+                merge_dependency_type(existing.dependency_type, skipped.dependency_type);
+        } else {
+            let index = self.items.len();
+            self.seen.insert(key, index);
             self.items.push(skipped);
         }
     }
@@ -283,6 +301,7 @@ struct DependencyEdge {
     alias: Option<String>,
     required: String,
     source: Option<String>,
+    is_path: bool,
     target: Option<String>,
     optional: bool,
     dependency_type: DependencyType,
@@ -300,29 +319,45 @@ fn partition_dependencies(
     for (member_index, member) in members.iter().enumerate() {
         for dep in &member.dependencies {
             let edge = build_edge(dep, member_index);
-
-            if !is_registry_source(edge.source.as_ref()) {
-                skipped.push(SkippedDependency {
-                    name: edge.name,
-                    alias: edge.alias,
-                    required: edge.required,
-                    reason: SkipReason::NonRegistry,
-                    dependency_type: edge.dependency_type,
-                    source: edge.source,
-                    target: edge.target,
-                });
-                continue;
-            }
-
-            // Every edge is kept: deduplicating here by (name, version_req) is what
-            // discarded the declaring member and the dependency kind. Edges are merged
-            // later by (name, resolved version) instead.
-            dependency_names.insert(edge.name.clone());
-            edges.push(edge);
+            partition_edge(edge, &mut dependency_names, &mut edges, skipped);
         }
     }
 
     (dependency_names, edges)
+}
+
+fn partition_edge(
+    edge: DependencyEdge,
+    dependency_names: &mut HashSet<String>,
+    edges: &mut Vec<DependencyEdge>,
+    skipped: &mut SkippedCollector,
+) {
+    let reason = if edge.is_path {
+        SkipReason::NonRegistry
+    } else {
+        match classify_registry_source(edge.source.as_ref()) {
+            RegistrySource::CratesIo => {
+                // Every edge is kept: deduplicating here by (name, version_req) is what
+                // discarded the declaring member and the dependency kind. Edges are merged
+                // later by (name, resolved version) instead.
+                dependency_names.insert(edge.name.clone());
+                edges.push(edge);
+                return;
+            }
+            RegistrySource::Unsupported => SkipReason::UnsupportedRegistry,
+            RegistrySource::NonRegistry => SkipReason::NonRegistry,
+        }
+    };
+
+    skipped.push(SkippedDependency {
+        name: edge.name,
+        alias: edge.alias,
+        required: edge.required,
+        reason,
+        dependency_type: edge.dependency_type,
+        source: edge.source,
+        target: edge.target,
+    });
 }
 
 fn build_edge(dep: &Dependency, member_index: usize) -> DependencyEdge {
@@ -331,6 +366,7 @@ fn build_edge(dep: &Dependency, member_index: usize) -> DependencyEdge {
         alias: dep.rename.clone(),
         required: dep.req.to_string(),
         source: dep.source.as_ref().map(ToString::to_string),
+        is_path: dep.path.is_some(),
         target: dep.target.as_ref().map(ToString::to_string),
         optional: dep.optional,
         dependency_type: convert_dependency_kind(dep.kind),
@@ -499,25 +535,46 @@ fn unresolved_skip(edge: &DependencyEdge) -> SkippedDependency {
 
 async fn fetch_latest_versions(
     dependency_names: &HashSet<String>,
-) -> (HashMap<String, VersionInfo>, bool, Vec<String>) {
-    let names: Vec<String> = dependency_names.iter().cloned().collect();
-    let mut warnings = Vec::new();
-
+) -> (HashMap<String, VersionInfo>, HashSet<String>, Vec<String>) {
+    let mut names: Vec<String> = dependency_names.iter().cloned().collect();
+    names.sort();
     let crates_io = match CratesIoClient::new() {
         Ok(client) => client,
         Err(err) => {
-            warnings.push(format!("failed to create crates.io client: {}", err));
-            return (HashMap::new(), false, warnings);
+            let detail = format!("failed to create crates.io client: {err}");
+            let warnings = registry_batch_failure_warnings(&names, &detail);
+            return (HashMap::new(), names.into_iter().collect(), warnings);
         }
     };
 
     match crates_io.fetch_latest_versions(&names, false).await {
-        Ok(versions) => (versions, true, warnings),
+        Ok(batch) => {
+            let warnings = registry_failure_warnings(&batch.failures);
+            let failures = batch.failures.into_keys().collect();
+            (batch.versions, failures, warnings)
+        }
         Err(err) => {
-            warnings.push(format!("failed to fetch latest crate versions: {}", err));
-            (HashMap::new(), false, warnings)
+            let detail = format!("batch lookup failed: {err}");
+            let warnings = registry_batch_failure_warnings(&names, &detail);
+            (HashMap::new(), names.into_iter().collect(), warnings)
         }
     }
+}
+
+fn registry_failure_warnings(failures: &BTreeMap<String, UpkeepError>) -> Vec<String> {
+    failures
+        .iter()
+        .map(|(name, err)| format!("failed to fetch latest version for {name}: {err}"))
+        .collect()
+}
+
+fn registry_batch_failure_warnings(names: &[String], detail: &str) -> Vec<String> {
+    names
+        .iter()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .map(|name| format!("failed to fetch latest version for {name}: {detail}"))
+        .collect()
 }
 
 /// Counts the skips that mean "there was never a comparison to make".
@@ -525,11 +582,12 @@ async fn fetch_latest_versions(
 /// A git, path or inactive-optional dependency has no crates.io release to be
 /// behind, so it is neither outdated nor unchecked — it belongs in the freshness
 /// denominator, as one unit, exactly like a group that was compared and found
-/// current. `RegistryUnavailable` and `RegistryMetadataMissing` are the opposite
-/// case: a comparison was owed and could not be made, so they stay out.
+/// current. `RegistryUnavailable`, `RegistryMetadataMissing`, and
+/// `UnsupportedRegistry` are the opposite case: a comparison was owed and could
+/// not be made, so they stay out.
 ///
-/// These entries are already deduplicated by [`SkippedCollector`] on
-/// `(name, alias, required, reason)`, so a crate declared by three members
+/// These entries are already deduplicated by [`SkippedCollector`] across every
+/// non-kind identity field, with dependency kinds merged, so a crate declared identically by three members
 /// contributes one — the same collapsing that `resolve_dependencies` applies to
 /// the compared ones. Counting the raw edges here instead is precisely the
 /// unit mismatch this function exists to avoid.
@@ -562,7 +620,7 @@ struct Processed {
 fn process_dependencies(
     dependencies: Vec<ResolvedDependency>,
     latest_versions: &HashMap<String, VersionInfo>,
-    registry_available: bool,
+    registry_failures: &HashSet<String>,
     skipped: &mut SkippedCollector,
 ) -> Result<Processed> {
     let mut packages = Vec::new();
@@ -575,7 +633,10 @@ fn process_dependencies(
         let latest = match get_latest_version(&dependency.name, latest_versions) {
             Some(latest) => latest,
             None => {
-                skipped.push(missing_registry_skip(&dependency, registry_available));
+                skipped.push(missing_registry_skip(
+                    &dependency,
+                    registry_failures.contains(&dependency.name),
+                ));
                 continue;
             }
         };
@@ -668,12 +729,12 @@ fn get_latest_version(
 
 fn missing_registry_skip(
     dependency: &ResolvedDependency,
-    registry_available: bool,
+    registry_unavailable: bool,
 ) -> SkippedDependency {
-    let reason = if registry_available {
-        SkipReason::RegistryMetadataMissing
-    } else {
+    let reason = if registry_unavailable {
         SkipReason::RegistryUnavailable
+    } else {
+        SkipReason::RegistryMetadataMissing
     };
     SkippedDependency {
         name: dependency.name.clone(),
@@ -785,23 +846,39 @@ async fn fetch_security(dependencies: &[ResolvedDependency]) -> Result<DepsSecur
     Ok(DepsSecurityOutput { summary, packages })
 }
 
-fn is_registry_source(source: Option<&String>) -> bool {
-    // For Dependency.source:
-    // - None means crates.io (default registry)
-    // - Some("registry+...") means another registry
-    // - Some("git+...") or Some("path+...") are non-registry sources
-    match source {
-        None => true, // crates.io
-        Some(s) => s.starts_with("registry+"),
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RegistrySource {
+    CratesIo,
+    Unsupported,
+    NonRegistry,
+}
+
+fn classify_registry_source(source: Option<&String>) -> RegistrySource {
+    const CRATES_IO_GIT_INDEX: &str = "registry+https://github.com/rust-lang/crates.io-index";
+    const CRATES_IO_SPARSE_INDEX: &str = "sparse+https://index.crates.io/";
+    const CRATES_IO_REGISTRY_INDEX: &str = "registry+https://index.crates.io/";
+
+    match source.map(String::as_str) {
+        // A missing source means the default crates.io registry. Cargo has emitted
+        // both the legacy Git index and the sparse index form in metadata over time.
+        None
+        | Some(CRATES_IO_GIT_INDEX)
+        | Some(CRATES_IO_SPARSE_INDEX)
+        | Some(CRATES_IO_REGISTRY_INDEX) => RegistrySource::CratesIo,
+        Some(source) if source.starts_with("registry+") || source.starts_with("sparse+") => {
+            RegistrySource::Unsupported
+        }
+        Some(_) => RegistrySource::NonRegistry,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        classify_update, get_latest_version, is_registry_source, merge_dependency_type,
-        not_applicable_count, process_dependencies, resolve_current_version, resolve_dependencies,
-        run_with_output, DependencyEdge, MemberVersions, Processed, SkippedCollector,
+        classify_registry_source, classify_update, get_latest_version, merge_dependency_type,
+        not_applicable_count, partition_edge, process_dependencies, resolve_current_version,
+        resolve_dependencies, run_with_output, DependencyEdge, MemberVersions, Processed,
+        RegistrySource, SkippedCollector,
     };
     use crate::core::analyzers::crates_io::VersionInfo;
     use crate::core::error::{ErrorCode, UpkeepError};
@@ -868,6 +945,7 @@ mod tests {
             alias: None,
             required: required.to_string(),
             source: None,
+            is_path: false,
             target: None,
             optional: false,
             dependency_type: DependencyType::Normal,
@@ -1397,8 +1475,13 @@ mod tests {
             minor,
             patch,
             compared,
-        } = process_dependencies(resolved, &latest_versions, true, &mut skipped)
-            .expect("process dependencies");
+        } = process_dependencies(
+            resolved,
+            &latest_versions,
+            &std::collections::HashSet::new(),
+            &mut skipped,
+        )
+        .expect("process dependencies");
 
         assert_eq!(packages.len(), 2);
         // Two groups reached a comparison. `rand` is one crate declared twice,
@@ -1422,8 +1505,13 @@ mod tests {
         let mut skipped = SkippedCollector::new();
         let resolved = resolve_dependencies(edges, &members, &mut skipped);
 
-        let processed = process_dependencies(resolved, &HashMap::new(), false, &mut skipped)
-            .expect("process dependencies");
+        let processed = process_dependencies(
+            resolved,
+            &HashMap::new(),
+            &std::collections::HashSet::from(["serde".to_string()]),
+            &mut skipped,
+        )
+        .expect("process dependencies");
 
         assert!(processed.packages.is_empty());
         // Nothing was compared, so the freshness denominator is 0 — not the
@@ -1451,8 +1539,13 @@ mod tests {
         // Two edges, one group.
         assert_eq!(resolved.len(), 1);
 
-        let processed = process_dependencies(resolved, &HashMap::new(), false, &mut skipped)
-            .expect("process dependencies");
+        let processed = process_dependencies(
+            resolved,
+            &HashMap::new(),
+            &std::collections::HashSet::from(["serde".to_string()]),
+            &mut skipped,
+        )
+        .expect("process dependencies");
         let skipped = skipped.into_vec();
 
         assert_eq!(processed.compared, 0);
@@ -1478,6 +1571,104 @@ mod tests {
         ];
 
         assert_eq!(not_applicable_count(&skipped), 3);
+    }
+
+    #[test]
+    fn process_dependencies_keeps_successes_when_a_sibling_lookup_failed() {
+        let members = vec![member_versions(
+            "solo",
+            &[("anyhow", "1.0.80"), ("serde", "1.0.200")],
+        )];
+        let edges = vec![edge("anyhow", "^1.0", 0), edge("serde", "^1.0", 0)];
+        let mut skipped = SkippedCollector::new();
+        let resolved = resolve_dependencies(edges, &members, &mut skipped);
+        let mut versions = HashMap::new();
+        versions.insert(
+            "serde".to_string(),
+            VersionInfo {
+                name: "serde".to_string(),
+                latest: Some("1.0.210".to_string()),
+                latest_stable: Some("1.0.210".to_string()),
+            },
+        );
+        let failed = std::collections::HashSet::from(["anyhow".to_string()]);
+
+        let processed = process_dependencies(resolved, &versions, &failed, &mut skipped)
+            .expect("process dependencies");
+
+        assert_eq!(processed.compared, 1);
+        assert_eq!(processed.packages.len(), 1);
+        assert_eq!(processed.packages[0].name, "serde");
+        let skipped = skipped.into_vec();
+        assert_eq!(skipped.len(), 1);
+        assert_eq!(skipped[0].name, "anyhow");
+        assert_eq!(skipped[0].reason, SkipReason::RegistryUnavailable);
+    }
+
+    #[test]
+    fn missing_version_in_successful_response_is_metadata_missing() {
+        let members = vec![member_versions("solo", &[("empty", "1.0.0")])];
+        let mut skipped = SkippedCollector::new();
+        let resolved = resolve_dependencies(vec![edge("empty", "^1.0", 0)], &members, &mut skipped);
+        let mut versions = HashMap::new();
+        versions.insert(
+            "empty".to_string(),
+            VersionInfo {
+                name: "empty".to_string(),
+                latest: None,
+                latest_stable: None,
+            },
+        );
+
+        let processed = process_dependencies(
+            resolved,
+            &versions,
+            &std::collections::HashSet::new(),
+            &mut skipped,
+        )
+        .expect("process dependencies");
+
+        assert_eq!(processed.compared, 0);
+        assert_eq!(
+            skipped.into_vec()[0].reason,
+            SkipReason::RegistryMetadataMissing
+        );
+    }
+
+    #[test]
+    fn registry_failure_warnings_are_sorted_and_name_each_crate() {
+        let failures = std::collections::BTreeMap::from([
+            (
+                "zeta".to_string(),
+                UpkeepError::message(ErrorCode::Http, "status 500"),
+            ),
+            (
+                "alpha".to_string(),
+                UpkeepError::message(ErrorCode::Json, "invalid JSON"),
+            ),
+        ]);
+
+        let warnings = super::registry_failure_warnings(&failures);
+
+        assert_eq!(warnings.len(), 2);
+        assert!(warnings[0].starts_with("failed to fetch latest version for alpha:"));
+        assert!(warnings[1].starts_with("failed to fetch latest version for zeta:"));
+    }
+
+    #[test]
+    fn batch_wide_failure_warnings_are_sorted_deduplicated_and_name_every_crate() {
+        let warnings = super::registry_batch_failure_warnings(
+            &["zeta".to_string(), "alpha".to_string(), "zeta".to_string()],
+            "client construction failed",
+        );
+
+        assert_eq!(
+            warnings,
+            vec![
+                "failed to fetch latest version for alpha: client construction failed",
+                "failed to fetch latest version for zeta: client construction failed",
+            ]
+        );
     }
 
     fn skipped_with(reason: SkipReason) -> SkippedDependency {
@@ -1509,13 +1700,118 @@ mod tests {
     }
 
     #[test]
-    fn is_registry_source_handles_registry_and_non_registry() {
-        let registry = Some("registry+https://example.com".to_string());
-        let git = Some("git+https://example.com/repo.git".to_string());
+    fn registry_source_classification_distinguishes_crates_io_alternates_and_non_registry() {
+        let legacy = "registry+https://github.com/rust-lang/crates.io-index".to_string();
+        let sparse = "sparse+https://index.crates.io/".to_string();
+        let registry_index = "registry+https://index.crates.io/".to_string();
+        let alternate = "registry+https://packages.example.com/index".to_string();
+        let git = "git+https://example.com/repo.git".to_string();
 
-        assert!(is_registry_source(None));
-        assert!(is_registry_source(registry.as_ref()));
-        assert!(!is_registry_source(git.as_ref()));
+        assert_eq!(classify_registry_source(None), RegistrySource::CratesIo);
+        assert_eq!(
+            classify_registry_source(Some(&legacy)),
+            RegistrySource::CratesIo
+        );
+        assert_eq!(
+            classify_registry_source(Some(&sparse)),
+            RegistrySource::CratesIo
+        );
+        assert_eq!(
+            classify_registry_source(Some(&registry_index)),
+            RegistrySource::CratesIo
+        );
+        assert_eq!(
+            classify_registry_source(Some(&alternate)),
+            RegistrySource::Unsupported
+        );
+        assert_eq!(
+            classify_registry_source(Some(&git)),
+            RegistrySource::NonRegistry
+        );
+    }
+
+    #[test]
+    fn alternate_registry_is_skipped_without_being_queued_for_crates_io() {
+        let mut alternate = edge("private-crate", "^1.0", 0);
+        alternate.source = Some("registry+https://packages.example.com/index".to_string());
+        alternate.target = Some("cfg(unix)".to_string());
+
+        let mut names = std::collections::HashSet::new();
+        let mut edges = Vec::new();
+        let mut skipped = SkippedCollector::new();
+        partition_edge(alternate, &mut names, &mut edges, &mut skipped);
+
+        assert!(names.is_empty(), "alternate registry must not be queried");
+        assert!(edges.is_empty());
+        let skipped = skipped.into_vec();
+        assert_eq!(skipped.len(), 1);
+        assert_eq!(skipped[0].reason, SkipReason::UnsupportedRegistry);
+        assert_eq!(
+            skipped[0].source.as_deref(),
+            Some("registry+https://packages.example.com/index")
+        );
+        assert_eq!(skipped[0].target.as_deref(), Some("cfg(unix)"));
+    }
+
+    #[test]
+    fn skipped_collector_keeps_distinct_sources_and_targets() {
+        let mut names = std::collections::HashSet::new();
+        let mut edges = Vec::new();
+        let mut skipped = SkippedCollector::new();
+        for (source, target) in [
+            ("registry+https://one.example/index", "cfg(unix)"),
+            ("registry+https://two.example/index", "cfg(windows)"),
+        ] {
+            let mut alternate = edge("private-crate", "^1.0", 0);
+            alternate.source = Some(source.to_string());
+            alternate.target = Some(target.to_string());
+            partition_edge(alternate, &mut names, &mut edges, &mut skipped);
+        }
+
+        let skipped = skipped.into_vec();
+        assert_eq!(skipped.len(), 2);
+        assert_eq!(
+            skipped[0].source.as_deref(),
+            Some("registry+https://one.example/index")
+        );
+        assert_eq!(
+            skipped[1].source.as_deref(),
+            Some("registry+https://two.example/index")
+        );
+    }
+
+    #[test]
+    fn path_dependency_is_non_registry_and_never_queued() {
+        let mut path = edge("private-path-crate", "*", 0);
+        path.is_path = true;
+        let mut names = std::collections::HashSet::new();
+        let mut edges = Vec::new();
+        let mut skipped = SkippedCollector::new();
+
+        partition_edge(path, &mut names, &mut edges, &mut skipped);
+
+        assert!(names.is_empty());
+        assert!(edges.is_empty());
+        assert_eq!(skipped.into_vec()[0].reason, SkipReason::NonRegistry);
+    }
+
+    #[test]
+    fn repeated_path_dependency_merges_kinds_into_one_checked_unit() {
+        let mut normal = edge("private-path-crate", "*", 0);
+        normal.is_path = true;
+        let mut dev = normal.clone();
+        dev.dependency_type = DependencyType::Dev;
+        let mut names = std::collections::HashSet::new();
+        let mut edges = Vec::new();
+        let mut skipped = SkippedCollector::new();
+
+        partition_edge(dev, &mut names, &mut edges, &mut skipped);
+        partition_edge(normal, &mut names, &mut edges, &mut skipped);
+
+        let skipped = skipped.into_vec();
+        assert_eq!(skipped.len(), 1);
+        assert_eq!(skipped[0].dependency_type, DependencyType::Normal);
+        assert_eq!(not_applicable_count(&skipped), 1);
     }
 
     #[test]

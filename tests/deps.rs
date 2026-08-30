@@ -213,3 +213,44 @@ fn deps_reports_empty_members_free_output_for_a_dependency_free_crate() {
     assert_eq!(json["total"], 0);
     assert_eq!(json["packages"], serde_json::json!([]));
 }
+
+#[test]
+fn deps_keeps_private_path_dependency_off_registry_lookup_queue() {
+    let temp_dir = tempfile::tempdir().expect("temp dir");
+    let root = temp_dir.path();
+    fs::create_dir_all(root.join("src")).expect("create root src");
+    fs::create_dir_all(root.join("private-path").join("src")).expect("create path src");
+    fs::write(
+        root.join("Cargo.toml"),
+        "[package]\nname = \"path-root\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nprivate-path = { path = \"private-path\" }\n",
+    )
+    .expect("write root manifest");
+    fs::write(root.join("src").join("main.rs"), "fn main() {}\n").expect("write root src");
+    fs::write(
+        root.join("private-path").join("Cargo.toml"),
+        "[package]\nname = \"private-path\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .expect("write path manifest");
+    fs::write(
+        root.join("private-path").join("src").join("lib.rs"),
+        "pub fn private() {}\n",
+    )
+    .expect("write path src");
+
+    let output = cargo_bin_cmd!("cargo-upkeep")
+        .current_dir(root)
+        .args(["deps", "--json"])
+        .output()
+        .expect("run deps");
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json: Value = serde_json::from_slice(&output.stdout).expect("parse deps json");
+
+    assert_eq!(json["checked"], 1);
+    assert_eq!(json["warnings"], serde_json::json!([]));
+    assert_eq!(json["skipped_packages"][0]["name"], "private-path");
+    assert_eq!(json["skipped_packages"][0]["reason"], "non_registry");
+}

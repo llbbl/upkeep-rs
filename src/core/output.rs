@@ -44,8 +44,9 @@ pub struct DepsOutput {
     /// than unmeasured (`NonRegistry`, `TargetSpecific`, `OptionalNotActivated`):
     /// a git or path dependency has no registry release to be behind, so it is
     /// neither outdated nor unchecked. Groups the registry could not answer for
-    /// (`RegistryUnavailable`, `RegistryMetadataMissing`) are excluded — those
-    /// are comparisons that were owed and never made.
+    /// (`RegistryUnavailable`, `RegistryMetadataMissing`, `UnsupportedRegistry`,
+    /// `MissingResolve`) are excluded — those are comparisons that were owed and
+    /// never made.
     ///
     /// `outdated <= checked` holds, which is what makes `(checked - outdated) /
     /// checked` a meaningful freshness ratio. Deriving that denominator as
@@ -326,7 +327,7 @@ pub enum UpdateType {
     Patch,
 }
 
-#[derive(Debug, Serialize, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Serialize, Clone, Copy, PartialEq, Eq, Hash)]
 #[serde(rename_all = "lowercase")]
 pub enum DependencyType {
     Normal,
@@ -343,6 +344,7 @@ pub enum SkipReason {
     TargetSpecific,
     RegistryMetadataMissing,
     RegistryUnavailable,
+    UnsupportedRegistry,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -804,6 +806,7 @@ impl fmt::Display for SkipReason {
             SkipReason::TargetSpecific => "target_specific",
             SkipReason::RegistryMetadataMissing => "registry_metadata_missing",
             SkipReason::RegistryUnavailable => "registry_unavailable",
+            SkipReason::UnsupportedRegistry => "unsupported_registry",
         };
         write!(f, "{label}")
     }
@@ -897,6 +900,10 @@ mod tests {
         assert_eq!(
             serde_json::to_value(SkipReason::TargetSpecific).unwrap(),
             Value::String("target_specific".into())
+        );
+        assert_eq!(
+            serde_json::to_value(SkipReason::UnsupportedRegistry).unwrap(),
+            Value::String("unsupported_registry".into())
         );
         assert_eq!(
             serde_json::to_value(Grade::A).unwrap(),
@@ -1549,6 +1556,10 @@ mod tests {
         assert_eq!(
             format!("{}", SkipReason::RegistryUnavailable),
             "registry_unavailable"
+        );
+        assert_eq!(
+            format!("{}", SkipReason::UnsupportedRegistry),
+            "unsupported_registry"
         );
         assert_eq!(format!("{}", Grade::F), "F");
     }

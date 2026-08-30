@@ -166,7 +166,15 @@ Because those are different units, `total - skipped` is not a valid substitute f
 
 ### Registry failures and denominator rules
 
-Some skipped dependencies are still considered checked because there was no meaningful registry comparison to make, such as `non_registry`, `target_specific`, and `optional_not_activated`. Others, such as `registry_unavailable` and `registry_metadata_missing`, mean the freshness question was never answered and are excluded from `checked`.
+Some skipped dependencies are still considered checked because there was no meaningful registry comparison to make, such as `non_registry`, `target_specific`, and `optional_not_activated`. Registry-related skips are excluded from `checked` because the freshness question was never answered:
+
+- `unsupported_registry` means the dependency comes from an alternate registry. `cargo-upkeep` preserves its `source` and `target` in `skipped_packages` but does not send its name to crates.io.
+- `registry_unavailable` means the crates.io request for that specific crate failed because of an HTTP, status, or response-decoding error.
+- `registry_metadata_missing` means crates.io responded successfully but provided no usable version.
+
+Registry lookups are failure-tolerant. If one crate fails, successful sibling lookups are still compared and freshness is measured over that checked subset. `warnings` contains one deterministic, crate-named entry for each failed lookup. If none of the owed comparisons can be completed, `quality` reports dependency freshness as unavailable instead of a measured 100.
+
+`missing_resolve` is also an unanswered freshness comparison: Cargo metadata contained the declaration but no resolved version to compare. It is excluded from `checked`, and a run containing only unresolved dependencies makes dependency freshness unavailable. Local path dependencies remain `non_registry`; their names are never sent to crates.io.
 
 That distinction is what `quality` uses for dependency freshness. If the registry could not answer, the denominator shrinks; those dependencies do not become implicitly healthy.
 
@@ -299,7 +307,7 @@ If nothing at all can be measured, `score` and `grade` are `null`. The command d
 
 ### Freshness inside `quality`
 
-The dependency freshness metric uses the grouped `checked` subset from `deps`, not declared edges and not `total - skipped`. Registry failures therefore reduce coverage instead of inflating freshness.
+The dependency freshness metric uses the grouped `checked` subset from `deps`, not declared edges and not `total - skipped`. Registry failures and unsupported registries therefore reduce coverage instead of inflating freshness. Partial results remain measured over successful comparisons; zero completed owed comparisons make the metric unavailable.
 
 ### CI guidance
 
