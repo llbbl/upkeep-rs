@@ -136,6 +136,12 @@ cargo upkeep deps --json
 
 Scan for RustSec advisories.
 
+> **Scope:** advisories are matched only against dependencies resolved from
+> crates.io. Path, git, vendored, and alternate-registry dependencies are
+> skipped. This is upstream `rustsec` behaviour as of 0.33, which avoids false
+> positives from local crates whose names collide with advisory crates. The
+> same scope applies to `deps --security` and to the `quality` grade.
+
 ```bash
 cargo upkeep audit --json
 ```
