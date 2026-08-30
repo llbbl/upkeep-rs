@@ -93,14 +93,39 @@ pub fn handle_tool_output(
     ))
 }
 
+/// Patterns cargo uses to report a subcommand it cannot find.
+///
+/// Cargo's wording has changed over time. Older releases emit
+/// ``error: no such subcommand: `machete` ``; current cargo (1.98) emits
+/// ``error: no such command: `machete` ``. Both spellings are matched, along
+/// with the documented historical `unknown subcommand` wording, so the
+/// detection keeps working across the toolchain range this crate supports.
+///
+/// Every pattern here widens the surface for misclassifying an unrelated cargo
+/// failure as a missing tool, so the list stays limited to wording cargo is
+/// known to have used. `unknown command` is deliberately absent: no cargo
+/// release is known to emit it.
+const MISSING_SUBCOMMAND_PATTERNS: [&str; 3] = [
+    "no such subcommand",
+    "unknown subcommand",
+    "no such command",
+];
+
 /// Checks if stderr indicates a missing cargo subcommand.
 ///
-/// This detects patterns like "no such subcommand" or "unknown subcommand"
-/// combined with the tool name.
+/// A match requires both one of [`MISSING_SUBCOMMAND_PATTERNS`] and the tool
+/// name, so an unrelated cargo failure is not misreported as a missing tool.
+///
+/// This is what makes [`ErrorCode::MissingTool`] fire, which in turn is what
+/// lets `quality` report "optional tool not installed" separately from
+/// "analyzer ran and failed" — so a wording drift here silently degrades that
+/// distinction rather than breaking loudly.
 pub fn is_missing_subcommand(stderr: &str, tool_name: &str) -> bool {
     let lower = stderr.to_lowercase();
     let tool_name_lower = tool_name.to_lowercase();
-    (lower.contains("no such subcommand") || lower.contains("unknown subcommand"))
+    MISSING_SUBCOMMAND_PATTERNS
+        .iter()
+        .any(|pattern| lower.contains(pattern))
         && lower.contains(&tool_name_lower)
 }
 
@@ -166,6 +191,55 @@ mod tests {
         assert!(!is_missing_subcommand("geiger is not installed", "geiger"));
         // Empty stderr
         assert!(!is_missing_subcommand("", "geiger"));
+    }
+
+    /// Verbatim stderr from cargo 1.98 for an uninstalled subcommand.
+    ///
+    /// Cargo dropped the word "sub" from this message, which previously made
+    /// [`is_missing_subcommand`] return `false` for every uninstalled optional
+    /// tool on a modern toolchain.
+    #[test]
+    fn test_is_missing_subcommand_current_cargo_wording() {
+        let machete = "error: no such command: `machete`\n\n\
+                       help: view all installed commands with `cargo --list`\n\
+                       help: find a package to install `machete` with `cargo search cargo-machete`\n";
+        assert!(is_missing_subcommand(machete, "machete"));
+
+        let geiger = "error: no such command: `geiger`\n\n\
+                      help: view all installed commands with `cargo --list`\n\
+                      help: find a package to install `geiger` with `cargo search cargo-geiger`\n";
+        assert!(is_missing_subcommand(geiger, "geiger"));
+
+        // The tool name still has to match: machete's message is not geiger's.
+        assert!(!is_missing_subcommand(machete, "geiger"));
+
+        // `unknown command` is not a wording cargo is known to use, and is not
+        // matched: an unverified pattern only widens the false-positive surface.
+        assert!(!is_missing_subcommand(
+            "error: unknown command `machete`",
+            "machete"
+        ));
+    }
+
+    #[test]
+    fn handle_tool_output_current_cargo_wording_is_missing_tool() {
+        let config = ExternalToolConfig {
+            tool_name: "machete",
+            install_hint: "cargo install cargo-machete",
+        };
+        let output = output_with(
+            101,
+            "",
+            "error: no such command: `machete`\n\n\
+             help: view all installed commands with `cargo --list`\n",
+        );
+        let err = handle_tool_output(output, &config, |stderr| {
+            is_missing_subcommand(stderr, "machete")
+        })
+        .unwrap_err();
+
+        assert_eq!(err.code(), ErrorCode::MissingTool);
+        assert!(err.to_string().contains("cargo-machete is not installed"));
     }
 
     #[test]

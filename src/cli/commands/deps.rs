@@ -59,7 +59,13 @@ pub async fn analyze(include_security: bool) -> Result<DepsOutput> {
         );
     }
 
-    let (packages, major, minor, patch) = process_dependencies(
+    let Processed {
+        packages,
+        major,
+        minor,
+        patch,
+        compared,
+    } = process_dependencies(
         dependencies,
         &latest_versions,
         registry_available,
@@ -70,6 +76,7 @@ pub async fn analyze(include_security: bool) -> Result<DepsOutput> {
 
     Ok(DepsOutput {
         total: total_dependencies,
+        checked: compared + not_applicable_count(&skipped_packages),
         outdated: packages.len(),
         major,
         minor,
@@ -513,16 +520,56 @@ async fn fetch_latest_versions(
     }
 }
 
+/// Counts the skips that mean "there was never a comparison to make".
+///
+/// A git, path or inactive-optional dependency has no crates.io release to be
+/// behind, so it is neither outdated nor unchecked — it belongs in the freshness
+/// denominator, as one unit, exactly like a group that was compared and found
+/// current. `RegistryUnavailable` and `RegistryMetadataMissing` are the opposite
+/// case: a comparison was owed and could not be made, so they stay out.
+///
+/// These entries are already deduplicated by [`SkippedCollector`] on
+/// `(name, alias, required, reason)`, so a crate declared by three members
+/// contributes one — the same collapsing that `resolve_dependencies` applies to
+/// the compared ones. Counting the raw edges here instead is precisely the
+/// unit mismatch this function exists to avoid.
+fn not_applicable_count(skipped: &[SkippedDependency]) -> usize {
+    skipped
+        .iter()
+        .filter(|entry| {
+            matches!(
+                entry.reason,
+                SkipReason::NonRegistry
+                    | SkipReason::TargetSpecific
+                    | SkipReason::OptionalNotActivated
+            )
+        })
+        .count()
+}
+
+/// The outcome of comparing every resolved dependency against the registry.
+struct Processed {
+    packages: Vec<OutdatedPackage>,
+    major: usize,
+    minor: usize,
+    patch: usize,
+    /// Resolved groups whose latest version was fetched and compared, current
+    /// ones included. This is the honest denominator for freshness, in the same
+    /// unit as `packages.len()` — never `DepsOutput::total`, which counts edges.
+    compared: usize,
+}
+
 fn process_dependencies(
     dependencies: Vec<ResolvedDependency>,
     latest_versions: &HashMap<String, VersionInfo>,
     registry_available: bool,
     skipped: &mut SkippedCollector,
-) -> Result<(Vec<OutdatedPackage>, usize, usize, usize)> {
+) -> Result<Processed> {
     let mut packages = Vec::new();
     let mut major = 0;
     let mut minor = 0;
     let mut patch = 0;
+    let mut compared = 0;
 
     for dependency in dependencies {
         let latest = match get_latest_version(&dependency.name, latest_versions) {
@@ -543,6 +590,9 @@ fn process_dependencies(
                 err,
             )
         })?;
+
+        // Past this point the comparison has been made, whatever its outcome.
+        compared += 1;
 
         if latest_version <= dependency.current {
             continue;
@@ -567,7 +617,13 @@ fn process_dependencies(
         });
     }
 
-    Ok((packages, major, minor, patch))
+    Ok(Processed {
+        packages,
+        major,
+        minor,
+        patch,
+        compared,
+    })
 }
 
 fn resolve_current_version(
@@ -744,8 +800,8 @@ fn is_registry_source(source: Option<&String>) -> bool {
 mod tests {
     use super::{
         classify_update, get_latest_version, is_registry_source, merge_dependency_type,
-        process_dependencies, resolve_current_version, resolve_dependencies, run_with_output,
-        DependencyEdge, MemberVersions, SkippedCollector,
+        not_applicable_count, process_dependencies, resolve_current_version, resolve_dependencies,
+        run_with_output, DependencyEdge, MemberVersions, Processed, SkippedCollector,
     };
     use crate::core::analyzers::crates_io::VersionInfo;
     use crate::core::error::{ErrorCode, UpkeepError};
@@ -1335,11 +1391,20 @@ mod tests {
             },
         );
 
-        let (packages, major, minor, patch) =
-            process_dependencies(resolved, &latest_versions, true, &mut skipped)
-                .expect("process dependencies");
+        let Processed {
+            packages,
+            major,
+            minor,
+            patch,
+            compared,
+        } = process_dependencies(resolved, &latest_versions, true, &mut skipped)
+            .expect("process dependencies");
 
         assert_eq!(packages.len(), 2);
+        // Two groups reached a comparison. `rand` is one crate declared twice,
+        // so the edge count is also 2 here only by coincidence of the versions
+        // differing; `compared` counts groups regardless.
+        assert_eq!(compared, 2);
         // Both edges are 0.x moving to a new minor, which cargo treats as breaking,
         // so each counts as a major update.
         assert_eq!(major, 2);
@@ -1357,13 +1422,74 @@ mod tests {
         let mut skipped = SkippedCollector::new();
         let resolved = resolve_dependencies(edges, &members, &mut skipped);
 
-        let (packages, ..) = process_dependencies(resolved, &HashMap::new(), false, &mut skipped)
+        let processed = process_dependencies(resolved, &HashMap::new(), false, &mut skipped)
             .expect("process dependencies");
 
-        assert!(packages.is_empty());
+        assert!(processed.packages.is_empty());
+        // Nothing was compared, so the freshness denominator is 0 — not the
+        // edge count, and not the edge count minus the skips.
+        assert_eq!(processed.compared, 0);
         let skipped = skipped.into_vec();
         assert_eq!(skipped.len(), 1);
         assert_eq!(skipped[0].reason, SkipReason::RegistryUnavailable);
+    }
+
+    /// The `total > groups` case, at the level of `analyze`'s own arithmetic.
+    ///
+    /// One crate declared twice by one member — `[dependencies]` and
+    /// `[dev-dependencies]` — is two edges but one group. Offline that is one
+    /// deduplicated skip and zero comparisons, so `checked` is 0 while `total`
+    /// is 2. Deriving `checked` as `total - skipped` gives 1 and claims a
+    /// comparison that never happened.
+    #[test]
+    fn checked_counts_groups_not_edges_for_a_redeclared_crate() {
+        let members = vec![member_versions("solo", &[("serde", "1.0.200")])];
+        let edges = vec![edge("serde", "^1.0", 0), edge("serde", "^1.0", 0)];
+        let mut skipped = SkippedCollector::new();
+        let resolved = resolve_dependencies(edges, &members, &mut skipped);
+
+        // Two edges, one group.
+        assert_eq!(resolved.len(), 1);
+
+        let processed = process_dependencies(resolved, &HashMap::new(), false, &mut skipped)
+            .expect("process dependencies");
+        let skipped = skipped.into_vec();
+
+        assert_eq!(processed.compared, 0);
+        assert_eq!(skipped.len(), 1);
+        assert_eq!(not_applicable_count(&skipped), 0);
+
+        let checked = processed.compared + not_applicable_count(&skipped);
+        assert_eq!(checked, 0, "nothing was compared, so nothing is checked");
+        // The arithmetic this replaced, spelled out: 2 edges - 1 skip = 1.
+        assert_ne!(checked, 2 - skipped.len());
+    }
+
+    /// Not-applicable skips are one unit each, not one per declaring member.
+    #[test]
+    fn not_applicable_count_covers_only_the_non_measurable_reasons() {
+        let skipped = vec![
+            skipped_with(SkipReason::NonRegistry),
+            skipped_with(SkipReason::TargetSpecific),
+            skipped_with(SkipReason::OptionalNotActivated),
+            skipped_with(SkipReason::RegistryUnavailable),
+            skipped_with(SkipReason::RegistryMetadataMissing),
+            skipped_with(SkipReason::MissingResolve),
+        ];
+
+        assert_eq!(not_applicable_count(&skipped), 3);
+    }
+
+    fn skipped_with(reason: SkipReason) -> SkippedDependency {
+        SkippedDependency {
+            name: format!("{reason:?}"),
+            alias: None,
+            required: "1.0".to_string(),
+            reason,
+            dependency_type: DependencyType::Normal,
+            source: None,
+            target: None,
+        }
     }
 
     #[test]
@@ -1416,6 +1542,7 @@ mod tests {
     fn sample_output() -> DepsOutput {
         DepsOutput {
             total: 2,
+            checked: 2,
             outdated: 1,
             major: 1,
             minor: 0,

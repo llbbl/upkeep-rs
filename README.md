@@ -108,6 +108,7 @@ cargo upkeep deps --json
 ```json
 {
   "total": 10,
+  "checked": 8,
   "outdated": 1,
   "major": 0,
   "minor": 0,
@@ -132,6 +133,20 @@ cargo upkeep deps --json
   "skipped_members": []
 }
 ```
+
+**`total` and `checked` are different units.** `total` counts dependency
+*edges* — every declaration by every workspace member, dev and build kinds
+included, with no deduplication — so one crate listed in both `[dependencies]`
+and `[dev-dependencies]` counts twice. `checked` counts what `outdated` and
+`skipped_packages` count: *groups*, where edges are merged by
+`(name, resolved version)`, so that same crate counts once.
+
+`checked` is the number of dependencies the freshness question was actually
+settled for — those compared against crates.io, plus those with no registry
+release to be behind (git, path, target-specific and inactive-optional
+dependencies). Dependencies the registry could not answer for are excluded.
+`total - skipped` is **not** a substitute: it subtracts a group count from an
+edge count, and can report comparisons that never happened.
 
 `update_type` follows cargo's compatibility rule rather than raw semver field
 comparison: the leftmost non-zero component is the one that carries breakage.
@@ -221,16 +236,96 @@ cargo upkeep quality --json
 
 ```json
 {
-  "command": "quality",
+  "score": 89.29,
   "grade": "B",
-  "scores": {
-    "dependencies": 82,
-    "security": 95,
-    "clippy": 70,
-    "msrv": 80
-  }
+  "complete": false,
+  "measured_weight": 0.85,
+  "breakdown": [
+    { "name": "Dependency freshness", "score": 80.0, "weight": 0.2 },
+    { "name": "Security", "score": 100.0, "weight": 0.25 },
+    { "name": "Unused dependencies", "score": null, "weight": 0.15 },
+    { "name": "Unsafe code", "score": 90.0, "weight": 0.15 },
+    { "name": "Clippy", "score": 76.0, "weight": 0.15 },
+    { "name": "MSRV", "score": 100.0, "weight": 0.1 }
+  ],
+  "unavailable": [
+    {
+      "name": "Unused dependencies",
+      "weight": 0.15,
+      "reason": "not_installed",
+      "detail": "cargo-machete is not installed; install with `cargo install cargo-machete`"
+    }
+  ],
+  "recommendations": [
+    "Update outdated dependencies.",
+    "Fix clippy warnings and errors.",
+    "Reduce unsafe code usage."
+  ]
 }
 ```
+
+#### Interpreting a partial result
+
+Six metrics contribute to the grade, each with a fixed weight. When an analyzer
+cannot run, that metric is **excluded and the rest renormalized** — its weight
+leaves the denominator rather than contributing a default value. `score` is
+therefore always "of what we could measure, rescaled to 0-100".
+
+The example above is that arithmetic in full. `cargo-machete` was not installed,
+so its 0.15 leaves the denominator and 0.85 of the weight remains:
+
+```text
+0.20*80 + 0.25*100 + 0.15*90 + 0.15*76 + 0.10*100 = 75.9
+75.9 / 0.85                                       = 89.29   -> B
+```
+
+Both alternatives are worse. Counting the unmeasured metric as 0 gives
+`75.9` — a `C` for not having installed an optional tool. Defaulting it to 100,
+which this tool used to do, gives `90.9` — an `A` awarded partly for a check
+that never ran.
+
+`recommendations` are ordered by weighted impact, not by score: dependency
+freshness is the first entry at `(100-80)*0.20 = 4.0`, ahead of clippy's
+`(100-76)*0.15 = 3.6`, even though clippy scored far worse.
+
+There is no penalty for an unavailable metric: not having `cargo-geiger`
+installed does not make a project worse. But there is no credit either, which is
+the point — an unmeasured check must not read as a passed one.
+
+| Field | Meaning |
+|-------|---------|
+| `score` | Weighted mean over the measured metrics, or `null` if none could be measured |
+| `grade` | Letter for `score`, or `null` for the same reason |
+| `complete` | `true` only when all six metrics were measured |
+| `measured_weight` | Fraction of total weight behind `score`, from `0.0` to `1.0` |
+| `breakdown[].score` | `null` for a metric that was not measured — never a substituted number |
+| `unavailable[].reason` | `not_installed` (an optional tool is absent) or `failed` (the analyzer ran and failed) |
+
+**If you gate CI on the grade, check `complete` as well.** An `A` over 40% of the
+weight is not an `A`, and `grade` alone cannot tell you which you have. Gate on
+`complete == true`, or on `measured_weight` clearing a threshold you accept.
+
+`reason` distinguishes the two causes because only one is yours to fix:
+`not_installed` is resolved by installing the tool named in `detail`, which
+carries the exact `cargo install` command. `failed` means an analyzer that
+should have worked did not. Neither says anything about project health.
+
+When nothing at all could be measured, `score` and `grade` are `null` rather
+than a number — there is no honest value to report. The text output says
+`Score: unavailable` in that case, and states any incompleteness above the score
+rather than below it.
+
+The same rule applies *within* a metric. Dependency freshness is scored over the
+dependencies whose latest version was actually fetched — the `checked` count
+from `deps`, not the declared `total`. If crates.io is unreachable for some of
+them, those leave that metric's denominator instead of counting as up to date,
+and if none could be checked the metric is `failed` rather than a perfect 100.
+
+So when the registry is the only thing unreachable, the run reports
+`complete: false` with 0.80 of the weight measured, not an `A`. A genuinely
+offline run measures less than that: the security metric fetches the RustSec
+advisory database over the network and fails too, taking another 0.25 with it.
+Read `measured_weight` rather than assuming a figure.
 
 ### tree
 
@@ -356,7 +451,7 @@ cargo install cargo-geiger
 
 ## Contributing
 
-1. Create or pick up a task in `bd`.
+1. Create or pick up a [GitHub issue](https://github.com/llbbl/upkeep-rs/issues).
 2. Keep changes focused and add tests for new behavior.
 3. Run `cargo fmt`, `cargo clippy`, and `cargo test` before submitting.
 

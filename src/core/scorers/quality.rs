@@ -1,8 +1,10 @@
-use crate::core::output::{Grade, MetricScore, QualityOutput};
+use crate::core::output::{
+    Grade, MetricScore, QualityOutput, UnavailableMetric, UnavailableReason,
+};
 
 // === Metric Weights ===
 // These weights determine how much each metric contributes to the overall quality score.
-// They must sum to 1.0 (100%).
+// They must sum to 1.0 (100%); `weights_sum_to_one` in the tests below enforces that.
 
 pub const WEIGHT_DEPENDENCY_FRESHNESS: f32 = 0.20;
 pub const WEIGHT_SECURITY: f32 = 0.25;
@@ -10,6 +12,26 @@ pub const WEIGHT_UNUSED_DEPS: f32 = 0.15;
 pub const WEIGHT_UNSAFE_CODE: f32 = 0.15;
 pub const WEIGHT_CLIPPY: f32 = 0.15;
 pub const WEIGHT_MSRV: f32 = 0.10;
+
+/// Total weight across all six metrics, used to express `measured_weight` as a
+/// fraction. Derived rather than hardcoded so it stays correct if a weight moves.
+const TOTAL_WEIGHT: f32 = WEIGHT_DEPENDENCY_FRESHNESS
+    + WEIGHT_SECURITY
+    + WEIGHT_UNUSED_DEPS
+    + WEIGHT_UNSAFE_CODE
+    + WEIGHT_CLIPPY
+    + WEIGHT_MSRV;
+
+// === Metric Names ===
+// Shared between the breakdown, the unavailable list, and `recommendations_for`,
+// which dispatches on them.
+
+pub const METRIC_DEPENDENCY_FRESHNESS: &str = "Dependency freshness";
+pub const METRIC_SECURITY: &str = "Security";
+pub const METRIC_UNUSED_DEPS: &str = "Unused dependencies";
+pub const METRIC_UNSAFE_CODE: &str = "Unsafe code";
+pub const METRIC_CLIPPY: &str = "Clippy";
+pub const METRIC_MSRV: &str = "MSRV";
 
 // === Security Penalty Multipliers ===
 // These values define how much each severity level reduces the security score.
@@ -28,11 +50,19 @@ const SECURITY_PENALTY_MODERATE: u64 = 5;
 /// Points deducted per low severity vulnerability (2 points each)
 const SECURITY_PENALTY_LOW: u64 = 2;
 
+/// Dependency freshness over the dependencies that were *actually checked*.
+///
+/// `total` is deliberately not "every dependency declared": a dependency whose
+/// latest version could not be fetched was not compared against anything, and
+/// counting it in the denominator scores it as up to date. See
+/// `dependency_freshness` in `cli::commands::quality` for the renormalization.
+#[derive(Debug)]
 pub struct DependencyFreshness {
     pub total: usize,
     pub outdated: usize,
 }
 
+#[derive(Debug)]
 pub struct SecuritySummary {
     pub critical: usize,
     pub high: usize,
@@ -40,11 +70,13 @@ pub struct SecuritySummary {
     pub low: usize,
 }
 
+#[derive(Debug)]
 pub struct ClippySummary {
     pub warnings: usize,
     pub errors: usize,
 }
 
+#[derive(Debug)]
 pub enum MsrvStatus {
     Valid,
     Missing,
@@ -52,86 +84,196 @@ pub enum MsrvStatus {
     Invalid,
 }
 
+#[derive(Debug)]
 pub struct UnusedSummary {
     pub unused_count: usize,
 }
 
+#[derive(Debug)]
 pub struct UnsafeSummary {
     pub total_unsafe: usize,
 }
 
-pub struct QualityInputs {
-    pub dependency_freshness: DependencyFreshness,
-    pub security: SecuritySummary,
-    pub unused: Option<UnusedSummary>,
-    pub unsafe_code: Option<UnsafeSummary>,
-    pub clippy: Option<ClippySummary>,
-    pub msrv: MsrvStatus,
+/// Whether a metric's analyzer actually produced data.
+///
+/// This exists so an analyzer that did not run cannot be encoded as healthy
+/// data. Every one of the six inputs is wrapped, including freshness and
+/// security, which previously fabricated an empty-but-valid summary on failure
+/// and scored a perfect 100.
+#[derive(Debug)]
+pub enum Availability<T> {
+    /// The analyzer ran and produced this data.
+    Measured(T),
+    /// The analyzer did not produce data, and this is why.
+    Unavailable {
+        reason: UnavailableReason,
+        detail: String,
+    },
 }
 
-pub fn score_quality(inputs: &QualityInputs) -> QualityOutput {
-    let freshness_score = dependency_freshness_score(&inputs.dependency_freshness);
-    let security_score = security_score(&inputs.security);
-    let unused_score = inputs
-        .unused
-        .as_ref()
-        .map(unused_deps_score)
-        .unwrap_or(100.0);
-    let unsafe_score = inputs
-        .unsafe_code
-        .as_ref()
-        .map(unsafe_code_score)
-        .unwrap_or(100.0);
-    let clippy_score = inputs.clippy.as_ref().map(clippy_score).unwrap_or(100.0);
-    let msrv_score = msrv_score(&inputs.msrv);
+impl<T> Availability<T> {
+    /// Constructor for an analyzer whose optional tool is absent.
+    pub fn not_installed(detail: impl Into<String>) -> Self {
+        Availability::Unavailable {
+            reason: UnavailableReason::NotInstalled,
+            detail: detail.into(),
+        }
+    }
 
-    let breakdown = vec![
-        MetricScore {
-            name: "Dependency freshness".to_string(),
-            score: freshness_score,
-            weight: WEIGHT_DEPENDENCY_FRESHNESS,
-        },
-        MetricScore {
-            name: "Security".to_string(),
-            score: security_score,
-            weight: WEIGHT_SECURITY,
-        },
-        MetricScore {
-            name: "Unused dependencies".to_string(),
-            score: unused_score,
-            weight: WEIGHT_UNUSED_DEPS,
-        },
-        MetricScore {
-            name: "Unsafe code".to_string(),
-            score: unsafe_score,
-            weight: WEIGHT_UNSAFE_CODE,
-        },
-        MetricScore {
-            name: "Clippy".to_string(),
-            score: clippy_score,
-            weight: WEIGHT_CLIPPY,
-        },
-        MetricScore {
-            name: "MSRV".to_string(),
-            score: msrv_score,
-            weight: WEIGHT_MSRV,
-        },
+    /// Constructor for an analyzer that ran and failed, or that ran but could
+    /// not check anything.
+    pub fn failed(detail: impl Into<String>) -> Self {
+        Availability::Unavailable {
+            reason: UnavailableReason::Failed,
+            detail: detail.into(),
+        }
+    }
+}
+
+pub struct QualityInputs {
+    pub dependency_freshness: Availability<DependencyFreshness>,
+    pub security: Availability<SecuritySummary>,
+    pub unused: Availability<UnusedSummary>,
+    pub unsafe_code: Availability<UnsafeSummary>,
+    pub clippy: Availability<ClippySummary>,
+    pub msrv: Availability<MsrvStatus>,
+}
+
+/// One metric after scoring, before it is split into `breakdown` / `unavailable`.
+struct EvaluatedMetric {
+    name: &'static str,
+    weight: f32,
+    outcome: Result<f32, (UnavailableReason, String)>,
+}
+
+fn evaluate<T>(
+    name: &'static str,
+    weight: f32,
+    input: Availability<T>,
+    score_fn: impl FnOnce(&T) -> f32,
+) -> EvaluatedMetric {
+    let outcome = match input {
+        Availability::Measured(value) => Ok(score_fn(&value)),
+        Availability::Unavailable { reason, detail } => Err((reason, detail)),
+    };
+    EvaluatedMetric {
+        name,
+        weight,
+        outcome,
+    }
+}
+
+/// Scores a project over the metrics that could actually be measured.
+///
+/// Unmeasured metrics are **excluded and the remainder renormalized**: their
+/// weight leaves the denominator entirely rather than contributing a defaulted
+/// value. A user who has not installed `cargo-geiger` does not have a worse
+/// project, so there is no penalty — but neither do they get credit for a check
+/// that never ran, which is what the old `unwrap_or(100.0)` handed out.
+///
+/// When nothing at all could be measured, `score` and `grade` are `None`: there
+/// is no honest number to report, and any number would be read as a grade.
+pub fn score_quality(inputs: QualityInputs) -> QualityOutput {
+    let metrics = [
+        evaluate(
+            METRIC_DEPENDENCY_FRESHNESS,
+            WEIGHT_DEPENDENCY_FRESHNESS,
+            inputs.dependency_freshness,
+            dependency_freshness_score,
+        ),
+        evaluate(
+            METRIC_SECURITY,
+            WEIGHT_SECURITY,
+            inputs.security,
+            security_score,
+        ),
+        evaluate(
+            METRIC_UNUSED_DEPS,
+            WEIGHT_UNUSED_DEPS,
+            inputs.unused,
+            unused_deps_score,
+        ),
+        evaluate(
+            METRIC_UNSAFE_CODE,
+            WEIGHT_UNSAFE_CODE,
+            inputs.unsafe_code,
+            unsafe_code_score,
+        ),
+        evaluate(METRIC_CLIPPY, WEIGHT_CLIPPY, inputs.clippy, clippy_score),
+        evaluate(METRIC_MSRV, WEIGHT_MSRV, inputs.msrv, msrv_score),
     ];
 
-    let score = breakdown
-        .iter()
-        .map(|metric| metric.score * metric.weight)
-        .sum::<f32>();
+    let mut breakdown = Vec::with_capacity(metrics.len());
+    let mut unavailable = Vec::new();
+    let mut measured_weight = 0.0f32;
+    let mut weighted_total = 0.0f32;
 
-    let grade = grade_for(score);
+    for metric in metrics {
+        let score = match metric.outcome {
+            Ok(score) => {
+                measured_weight += metric.weight;
+                weighted_total += score * metric.weight;
+                // Weighted with the raw value, reported rounded: every number
+                // this type exposes — `score`, `measured_weight`, and each
+                // breakdown entry — is in hundredths, so the JSON and the text
+                // rendering of the same metric cannot disagree.
+                Some(round_hundredths(score))
+            }
+            Err((reason, detail)) => {
+                unavailable.push(UnavailableMetric {
+                    name: metric.name.to_string(),
+                    weight: metric.weight,
+                    reason,
+                    detail,
+                });
+                None
+            }
+        };
+
+        breakdown.push(MetricScore {
+            name: metric.name.to_string(),
+            score,
+            weight: metric.weight,
+        });
+    }
+
+    // Derived from the list, not from float equality on the summed weights:
+    // `0.20 + 0.25 + ... == 1.0` is not reliable in f32.
+    let complete = unavailable.is_empty();
+
+    // Renormalize over the weight that ran. The guard is the division-by-zero
+    // protection: when every metric is unavailable `measured_weight` is 0.0,
+    // and `0.0 / 0.0` is NaN, which would serialize as `null` by accident
+    // rather than by the deliberate "nothing could be measured" path below.
+    let score = (measured_weight > 0.0).then(|| round_hundredths(weighted_total / measured_weight));
+    // Grade the same number that is reported. Both the JSON `score` and the
+    // text rendering are this rounded value, so the letter is derived from the
+    // figure the reader sees rather than from a raw value that could round
+    // across a grade boundary. Rounding first can hand out at most 0.005 of
+    // undeserved credit exactly at a boundary; number/letter agreement is
+    // worth more than that.
+    let grade = score.map(grade_for);
     let recommendations = recommendations_for(&breakdown);
 
     QualityOutput {
         score,
         grade,
+        complete,
+        measured_weight: round_hundredths(measured_weight / TOTAL_WEIGHT),
         breakdown,
+        unavailable,
         recommendations,
     }
+}
+
+/// Rounds to two decimal places to keep f32 accumulation noise out of the
+/// serialized contract.
+///
+/// Renormalization divides by a summed weight, so a flawless partial run would
+/// otherwise emit `"score": 99.99999` — which reads as "not quite perfect" and
+/// defeats any consumer comparing against a threshold exactly.
+fn round_hundredths(value: f32) -> f32 {
+    (value * 100.0).round() / 100.0
 }
 
 fn dependency_freshness_score(input: &DependencyFreshness) -> f32 {
@@ -198,28 +340,35 @@ fn grade_for(score: f32) -> Grade {
     }
 }
 
+/// Builds the actionable recommendations, ordered by weighted impact.
+///
+/// Metrics with a `None` score are skipped entirely. An unmeasured metric is
+/// not a finding about the project, and telling a user to "Remove unused
+/// dependencies" because `cargo-machete` is missing is exactly the false signal
+/// this module is meant to stop emitting. Unmeasured metrics are reported
+/// through `QualityOutput::unavailable` instead.
 fn recommendations_for(metrics: &[MetricScore]) -> Vec<String> {
     let mut items = Vec::new();
 
     for metric in metrics {
+        let Some(score) = metric.score else {
+            continue;
+        };
+
         let message = match metric.name.as_str() {
-            "Dependency freshness" if metric.score < 90.0 => {
+            METRIC_DEPENDENCY_FRESHNESS if score < 90.0 => {
                 Some("Update outdated dependencies.".to_string())
             }
-            "Security" if metric.score < 90.0 => Some("Address security advisories.".to_string()),
-            "Unused dependencies" if metric.score < 100.0 => {
-                Some("Remove unused dependencies.".to_string())
-            }
-            "Unsafe code" if metric.score < 100.0 => Some("Reduce unsafe code usage.".to_string()),
-            "Clippy" if metric.score < 90.0 => Some("Fix clippy warnings and errors.".to_string()),
-            "MSRV" if metric.score < 100.0 => {
-                Some("Declare a valid MSRV in Cargo.toml.".to_string())
-            }
+            METRIC_SECURITY if score < 90.0 => Some("Address security advisories.".to_string()),
+            METRIC_UNUSED_DEPS if score < 100.0 => Some("Remove unused dependencies.".to_string()),
+            METRIC_UNSAFE_CODE if score < 100.0 => Some("Reduce unsafe code usage.".to_string()),
+            METRIC_CLIPPY if score < 90.0 => Some("Fix clippy warnings and errors.".to_string()),
+            METRIC_MSRV if score < 100.0 => Some("Declare a valid MSRV in Cargo.toml.".to_string()),
             _ => None,
         };
 
         if let Some(message) = message {
-            let impact = (100.0 - metric.score) * metric.weight;
+            let impact = (100.0 - score) * metric.weight;
             items.push((impact, message));
         }
     }
@@ -319,36 +468,12 @@ mod tests {
     #[test]
     fn recommendations_sorted_by_impact() {
         let metrics = vec![
-            MetricScore {
-                name: "Dependency freshness".to_string(),
-                score: 60.0,
-                weight: WEIGHT_DEPENDENCY_FRESHNESS,
-            },
-            MetricScore {
-                name: "Security".to_string(),
-                score: 70.0,
-                weight: WEIGHT_SECURITY,
-            },
-            MetricScore {
-                name: "Clippy".to_string(),
-                score: 80.0,
-                weight: WEIGHT_CLIPPY,
-            },
-            MetricScore {
-                name: "Unused dependencies".to_string(),
-                score: 90.0,
-                weight: WEIGHT_UNUSED_DEPS,
-            },
-            MetricScore {
-                name: "Unsafe code".to_string(),
-                score: 95.0,
-                weight: WEIGHT_UNSAFE_CODE,
-            },
-            MetricScore {
-                name: "MSRV".to_string(),
-                score: 50.0,
-                weight: WEIGHT_MSRV,
-            },
+            metric(METRIC_DEPENDENCY_FRESHNESS, Some(60.0)),
+            metric(METRIC_SECURITY, Some(70.0)),
+            metric(METRIC_CLIPPY, Some(80.0)),
+            metric(METRIC_UNUSED_DEPS, Some(90.0)),
+            metric(METRIC_UNSAFE_CODE, Some(95.0)),
+            metric(METRIC_MSRV, Some(50.0)),
         ];
 
         let recommendations = recommendations_for(&metrics);
@@ -358,5 +483,346 @@ mod tests {
         assert_eq!(recommendations[3], "Fix clippy warnings and errors.");
         assert_eq!(recommendations[4], "Remove unused dependencies.");
         assert_eq!(recommendations[5], "Reduce unsafe code usage.");
+    }
+
+    // === Helpers for the availability tests ===
+
+    fn weight_for(name: &str) -> f32 {
+        match name {
+            METRIC_DEPENDENCY_FRESHNESS => WEIGHT_DEPENDENCY_FRESHNESS,
+            METRIC_SECURITY => WEIGHT_SECURITY,
+            METRIC_UNUSED_DEPS => WEIGHT_UNUSED_DEPS,
+            METRIC_UNSAFE_CODE => WEIGHT_UNSAFE_CODE,
+            METRIC_CLIPPY => WEIGHT_CLIPPY,
+            METRIC_MSRV => WEIGHT_MSRV,
+            other => panic!("unknown metric {other}"),
+        }
+    }
+
+    fn metric(name: &str, score: Option<f32>) -> MetricScore {
+        MetricScore {
+            name: name.to_string(),
+            score,
+            weight: weight_for(name),
+        }
+    }
+
+    /// A project with nothing wrong with it: every metric measures a clean 100.
+    fn perfect_inputs() -> QualityInputs {
+        QualityInputs {
+            dependency_freshness: Availability::Measured(DependencyFreshness {
+                total: 10,
+                outdated: 0,
+            }),
+            security: Availability::Measured(SecuritySummary {
+                critical: 0,
+                high: 0,
+                moderate: 0,
+                low: 0,
+            }),
+            unused: Availability::Measured(UnusedSummary { unused_count: 0 }),
+            unsafe_code: Availability::Measured(UnsafeSummary { total_unsafe: 0 }),
+            clippy: Availability::Measured(ClippySummary {
+                warnings: 0,
+                errors: 0,
+            }),
+            msrv: Availability::Measured(MsrvStatus::Valid),
+        }
+    }
+
+    fn score_of(output: &QualityOutput, name: &str) -> Option<f32> {
+        output
+            .breakdown
+            .iter()
+            .find(|metric| metric.name == name)
+            .unwrap_or_else(|| panic!("missing breakdown entry for {name}"))
+            .score
+    }
+
+    fn unavailable_entry<'a>(output: &'a QualityOutput, name: &str) -> &'a UnavailableMetric {
+        output
+            .unavailable
+            .iter()
+            .find(|metric| metric.name == name)
+            .unwrap_or_else(|| panic!("expected {name} to be unavailable"))
+    }
+
+    #[test]
+    fn weights_sum_to_one() {
+        assert_close(TOTAL_WEIGHT, 1.0);
+    }
+
+    /// The exact scenario the README documents under "Interpreting a partial
+    /// result", so its printed numbers cannot drift from the scorer.
+    ///
+    /// That section exists to teach people to read the renormalized score, so
+    /// arithmetic it cannot reproduce invites readers to distrust the
+    /// renormalization itself. Regenerate the README block from this test's
+    /// output rather than editing the numbers by hand.
+    fn readme_partial_example() -> QualityInputs {
+        QualityInputs {
+            dependency_freshness: Availability::Measured(DependencyFreshness {
+                total: 10,
+                outdated: 2,
+            }),
+            security: Availability::Measured(SecuritySummary {
+                critical: 0,
+                high: 0,
+                moderate: 0,
+                low: 0,
+            }),
+            unused: Availability::not_installed(
+                "cargo-machete is not installed; install with `cargo install cargo-machete`",
+            ),
+            unsafe_code: Availability::Measured(UnsafeSummary { total_unsafe: 2 }),
+            clippy: Availability::Measured(ClippySummary {
+                warnings: 12,
+                errors: 0,
+            }),
+            msrv: Availability::Measured(MsrvStatus::Valid),
+        }
+    }
+
+    #[test]
+    fn readme_partial_example_matches_the_documented_output() {
+        let output = score_quality(readme_partial_example());
+
+        assert_eq!(score_of(&output, METRIC_DEPENDENCY_FRESHNESS), Some(80.0));
+        assert_eq!(score_of(&output, METRIC_SECURITY), Some(100.0));
+        assert_eq!(score_of(&output, METRIC_UNUSED_DEPS), None);
+        assert_eq!(score_of(&output, METRIC_UNSAFE_CODE), Some(90.0));
+        assert_eq!(score_of(&output, METRIC_CLIPPY), Some(76.0));
+        assert_eq!(score_of(&output, METRIC_MSRV), Some(100.0));
+
+        // 0.20*80 + 0.25*100 + 0.15*90 + 0.15*76 + 0.10*100 = 75.9
+        // 75.9 / 0.85 = 89.29
+        assert_eq!(output.score, Some(89.29));
+        assert_eq!(output.grade, Some(Grade::B));
+        assert!(!output.complete);
+        assert_close(output.measured_weight, 0.85);
+
+        // Ordered by weighted impact: freshness (100-80)*0.20 = 4.0, then
+        // clippy (100-76)*0.15 = 3.6, then unsafe (100-90)*0.15 = 1.5.
+        assert_eq!(
+            output.recommendations,
+            vec![
+                "Update outdated dependencies.".to_string(),
+                "Fix clippy warnings and errors.".to_string(),
+                "Reduce unsafe code usage.".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn score_quality_is_complete_when_everything_measured() {
+        let output = score_quality(perfect_inputs());
+
+        assert!(output.complete);
+        assert!(output.unavailable.is_empty());
+        assert_close(output.measured_weight, 1.0);
+        assert_close(output.score.expect("score"), 100.0);
+        assert_eq!(output.grade, Some(Grade::A));
+        assert!(output.breakdown.iter().all(|metric| metric.score.is_some()));
+    }
+
+    #[test]
+    fn score_quality_excludes_unmeasured_metric_from_the_denominator() {
+        // Everything perfect except clippy, which scores 0, and unused, which
+        // is unmeasured. Renormalizing drops unused' 0.15 from the denominator:
+        // measured weight 0.85, weighted total 0.85 - 0.15 (clippy) = 0.70.
+        // 0.70 / 0.85 * 100 = 82.35.
+        let output = score_quality(QualityInputs {
+            clippy: Availability::Measured(ClippySummary {
+                warnings: 100,
+                errors: 0,
+            }),
+            unused: Availability::not_installed("cargo-machete is not installed"),
+            ..perfect_inputs()
+        });
+
+        assert!(!output.complete);
+        assert_close(output.measured_weight, 0.85);
+        assert_close(output.score.expect("score"), 82.35);
+        assert_eq!(output.grade, Some(Grade::B));
+
+        // The old behaviour scored the unmeasured metric 100 and divided by a
+        // full 1.0 denominator, giving 85.0 and hiding the exclusion entirely.
+        assert!(output.score.expect("score") < 85.0);
+    }
+
+    #[test]
+    fn score_quality_missing_machete_does_not_inflate_score() {
+        let output = score_quality(QualityInputs {
+            unused: Availability::not_installed(
+                "cargo-machete is not installed; install with `cargo install cargo-machete`",
+            ),
+            ..perfect_inputs()
+        });
+
+        assert!(!output.complete);
+        assert_eq!(score_of(&output, METRIC_UNUSED_DEPS), None);
+        assert_close(output.measured_weight, 0.85);
+
+        let entry = unavailable_entry(&output, METRIC_UNUSED_DEPS);
+        assert_eq!(entry.reason, UnavailableReason::NotInstalled);
+        assert_close(entry.weight, WEIGHT_UNUSED_DEPS);
+        assert!(entry.detail.contains("cargo install cargo-machete"));
+
+        // A clean project still grades cleanly — a missing optional tool is not
+        // a health problem, so exclusion must not penalize.
+        assert_close(output.score.expect("score"), 100.0);
+        assert!(!output
+            .recommendations
+            .contains(&"Remove unused dependencies.".to_string()));
+    }
+
+    #[test]
+    fn score_quality_missing_geiger_does_not_inflate_score() {
+        let output = score_quality(QualityInputs {
+            unsafe_code: Availability::not_installed(
+                "cargo-geiger is not installed; install with `cargo install cargo-geiger`",
+            ),
+            ..perfect_inputs()
+        });
+
+        assert_eq!(score_of(&output, METRIC_UNSAFE_CODE), None);
+        assert_eq!(
+            unavailable_entry(&output, METRIC_UNSAFE_CODE).reason,
+            UnavailableReason::NotInstalled
+        );
+        assert_close(output.measured_weight, 0.85);
+        assert!(!output
+            .recommendations
+            .contains(&"Reduce unsafe code usage.".to_string()));
+    }
+
+    #[test]
+    fn score_quality_failed_audit_is_excluded_not_assumed_clean() {
+        let output = score_quality(QualityInputs {
+            security: Availability::failed("advisory database unreachable"),
+            ..perfect_inputs()
+        });
+
+        assert!(!output.complete);
+        assert_eq!(score_of(&output, METRIC_SECURITY), None);
+        assert_close(output.measured_weight, 0.75);
+
+        let entry = unavailable_entry(&output, METRIC_SECURITY);
+        assert_eq!(entry.reason, UnavailableReason::Failed);
+        assert_close(entry.weight, WEIGHT_SECURITY);
+        assert!(!output
+            .recommendations
+            .contains(&"Address security advisories.".to_string()));
+    }
+
+    #[test]
+    fn score_quality_failed_deps_is_excluded_not_scored_as_empty() {
+        // The old fallback was `total: 0`, which `dependency_freshness_score`
+        // scores 100. Exclusion must not resurrect that.
+        let output = score_quality(QualityInputs {
+            dependency_freshness: Availability::failed("crates.io unreachable"),
+            ..perfect_inputs()
+        });
+
+        assert_eq!(score_of(&output, METRIC_DEPENDENCY_FRESHNESS), None);
+        assert_close(output.measured_weight, 0.80);
+        assert_eq!(
+            unavailable_entry(&output, METRIC_DEPENDENCY_FRESHNESS).reason,
+            UnavailableReason::Failed
+        );
+        assert!(!output
+            .recommendations
+            .contains(&"Update outdated dependencies.".to_string()));
+    }
+
+    #[test]
+    fn score_quality_mixed_success_and_failure() {
+        // Measured: security (0.25) at 100, MSRV (0.10) at 50, freshness (0.20)
+        // at 80. Unmeasured: unused (not installed), unsafe (not installed),
+        // clippy (failed). Measured weight 0.55; weighted total
+        // 0.25*100 + 0.10*50 + 0.20*80 = 25 + 5 + 16 = 46. 46 / 0.55 = 83.64.
+        let output = score_quality(QualityInputs {
+            dependency_freshness: Availability::Measured(DependencyFreshness {
+                total: 10,
+                outdated: 2,
+            }),
+            security: Availability::Measured(SecuritySummary {
+                critical: 0,
+                high: 0,
+                moderate: 0,
+                low: 0,
+            }),
+            unused: Availability::not_installed("cargo-machete is not installed"),
+            unsafe_code: Availability::not_installed("cargo-geiger is not installed"),
+            clippy: Availability::failed("clippy exited 101"),
+            msrv: Availability::Measured(MsrvStatus::Missing),
+        });
+
+        assert!(!output.complete);
+        assert_eq!(output.unavailable.len(), 3);
+        assert_close(output.measured_weight, 0.55);
+        assert_close(output.score.expect("score"), 83.64);
+        assert_eq!(output.grade, Some(Grade::B));
+
+        assert_eq!(
+            unavailable_entry(&output, METRIC_UNUSED_DEPS).reason,
+            UnavailableReason::NotInstalled
+        );
+        assert_eq!(
+            unavailable_entry(&output, METRIC_CLIPPY).reason,
+            UnavailableReason::Failed
+        );
+
+        // Only the measured findings produce advice, ordered by weighted
+        // impact: MSRV loses (100-50)*0.10 = 5.0, freshness (100-80)*0.20 = 4.0.
+        assert_eq!(
+            output.recommendations,
+            vec![
+                "Declare a valid MSRV in Cargo.toml.".to_string(),
+                "Update outdated dependencies.".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn score_quality_reports_nothing_when_no_metric_measured() {
+        let output = score_quality(QualityInputs {
+            dependency_freshness: Availability::failed("boom"),
+            security: Availability::failed("boom"),
+            unused: Availability::not_installed("cargo-machete is not installed"),
+            unsafe_code: Availability::not_installed("cargo-geiger is not installed"),
+            clippy: Availability::failed("boom"),
+            msrv: Availability::failed("boom"),
+        });
+
+        assert_eq!(output.score, None);
+        assert_eq!(output.grade, None);
+        assert!(!output.complete);
+        assert_close(output.measured_weight, 0.0);
+        assert_eq!(output.unavailable.len(), 6);
+        assert!(output.breakdown.iter().all(|metric| metric.score.is_none()));
+        assert!(output.recommendations.is_empty());
+    }
+
+    /// The bug this whole change exists to prevent: a total analysis failure
+    /// used to print `Score: 100.0 / Grade: A`.
+    #[test]
+    fn total_failure_can_never_produce_a_passing_grade() {
+        let output = score_quality(QualityInputs {
+            dependency_freshness: Availability::failed("boom"),
+            security: Availability::failed("boom"),
+            unused: Availability::failed("boom"),
+            unsafe_code: Availability::failed("boom"),
+            clippy: Availability::failed("boom"),
+            msrv: Availability::failed("boom"),
+        });
+
+        assert!(
+            output.grade.is_none(),
+            "a grade of {:?} was produced from zero measurements",
+            output.grade
+        );
+        assert!(output.score.is_none());
+        assert!(!output.complete);
     }
 }
