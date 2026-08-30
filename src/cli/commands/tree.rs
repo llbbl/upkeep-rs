@@ -11,6 +11,11 @@ use crate::core::output::{print_json, TreeNode, TreeOutput, TreeStats};
 /// and deep recursion can exhaust stack space on some platforms.
 const MAX_TREE_DEPTH: usize = 200;
 
+/// Maximum number of real package occurrences rendered in one tree build.
+/// Repeated paths through a highly convergent dependency graph can otherwise
+/// produce exponentially more tree nodes than there are unique packages.
+const MAX_RENDERED_NODES: usize = 50_000;
+
 #[derive(Clone)]
 struct Edge {
     id: PackageId,
@@ -26,8 +31,8 @@ struct TreeBuildContext<'a> {
     features_by_id: &'a HashMap<PackageId, Vec<String>>,
     args: &'a TreeArgs,
     duplicate_names: &'a HashSet<String>,
-    expanded: HashSet<PackageId>,
     path: HashSet<PackageId>,
+    rendered_nodes: usize,
 }
 
 pub async fn run(json: bool, args: TreeArgs) -> Result<()> {
@@ -111,8 +116,8 @@ pub async fn run(json: bool, args: TreeArgs) -> Result<()> {
         features_by_id: &features_by_id,
         args: &args,
         duplicate_names: &duplicate_names,
-        expanded: HashSet::new(),
         path: HashSet::new(),
+        rendered_nodes: 0,
     };
 
     let root = match invert_target {
@@ -250,6 +255,18 @@ fn build_node(
         )
     })?;
 
+    if ctx.rendered_nodes >= MAX_RENDERED_NODES {
+        return Err(UpkeepError::message(
+            ErrorCode::InvalidData,
+            format!(
+                "dependency tree exceeds rendered-node limit of {MAX_RENDERED_NODES} at package '{}'; \
+                 use --depth to limit expansion",
+                package.name
+            ),
+        ));
+    }
+    ctx.rendered_nodes += 1;
+
     let duplicate = ctx.duplicate_names.contains(package.name.as_str());
     let mut node = TreeNode {
         name: package.name.to_string(),
@@ -267,14 +284,6 @@ fn build_node(
     };
 
     if ctx.args.depth.map(|limit| depth >= limit).unwrap_or(false) {
-        return Ok(if ctx.args.duplicates && !duplicate && depth > 0 {
-            None
-        } else {
-            Some(node)
-        });
-    }
-
-    if !ctx.expanded.insert(id.clone()) {
         return Ok(if ctx.args.duplicates && !duplicate && depth > 0 {
             None
         } else {

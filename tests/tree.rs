@@ -89,6 +89,137 @@ fn create_tree_workspace() -> tempfile::TempDir {
     temp_dir
 }
 
+fn create_shared_subtree_project() -> tempfile::TempDir {
+    let temp_dir = tempfile::tempdir().expect("temp dir");
+    let root = temp_dir.path();
+
+    write_file(
+        &root.join("Cargo.toml"),
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nnormal_left = { path = \"crates/normal_left\" }\nnormal_right = { path = \"crates/normal_right\" }\nreverse_hub = { path = \"crates/reverse_hub\" }\ndup = { path = \"crates/dup_v2\" }\n",
+    );
+    write_file(&root.join("src/lib.rs"), "pub fn app() {}\n");
+
+    for parent in ["normal_left", "normal_right"] {
+        write_file(
+            &root.join(format!("crates/{parent}/Cargo.toml")),
+            &format!(
+                "[package]\nname = \"{parent}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nshared = {{ path = \"../shared\" }}\n"
+            ),
+        );
+        write_file(
+            &root.join(format!("crates/{parent}/src/lib.rs")),
+            "pub fn parent() {}\n",
+        );
+    }
+
+    write_file(
+        &root.join("crates/shared/Cargo.toml"),
+        "[package]\nname = \"shared\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nshared_leaf = { path = \"../shared_leaf\" }\ndup = { path = \"../dup_v1\" }\n",
+    );
+    write_file(
+        &root.join("crates/shared/src/lib.rs"),
+        "pub fn shared() {}\n",
+    );
+
+    write_file(
+        &root.join("crates/shared_leaf/Cargo.toml"),
+        "[package]\nname = \"shared_leaf\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    );
+    write_file(
+        &root.join("crates/shared_leaf/src/lib.rs"),
+        "pub fn shared_leaf() {}\n",
+    );
+
+    write_file(
+        &root.join("crates/dup_v1/Cargo.toml"),
+        "[package]\nname = \"dup\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    );
+    write_file(
+        &root.join("crates/dup_v1/src/lib.rs"),
+        "pub fn dup_v1() {}\n",
+    );
+    write_file(
+        &root.join("crates/dup_v2/Cargo.toml"),
+        "[package]\nname = \"dup\"\nversion = \"0.2.0\"\nedition = \"2021\"\n",
+    );
+    write_file(
+        &root.join("crates/dup_v2/src/lib.rs"),
+        "pub fn dup_v2() {}\n",
+    );
+
+    write_file(
+        &root.join("crates/reverse_hub/Cargo.toml"),
+        "[package]\nname = \"reverse_hub\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nreverse_left = { path = \"../reverse_left\" }\nreverse_right = { path = \"../reverse_right\" }\n",
+    );
+    write_file(
+        &root.join("crates/reverse_hub/src/lib.rs"),
+        "pub fn reverse_hub() {}\n",
+    );
+
+    for parent in ["reverse_left", "reverse_right"] {
+        write_file(
+            &root.join(format!("crates/{parent}/Cargo.toml")),
+            &format!(
+                "[package]\nname = \"{parent}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nreverse_target = {{ path = \"../reverse_target\" }}\n"
+            ),
+        );
+        write_file(
+            &root.join(format!("crates/{parent}/src/lib.rs")),
+            "pub fn reverse_parent() {}\n",
+        );
+    }
+
+    write_file(
+        &root.join("crates/reverse_target/Cargo.toml"),
+        "[package]\nname = \"reverse_target\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    );
+    write_file(
+        &root.join("crates/reverse_target/src/lib.rs"),
+        "pub fn reverse_target() {}\n",
+    );
+
+    temp_dir
+}
+
+fn create_expanding_dag_project() -> tempfile::TempDir {
+    const LAYERS: usize = 15;
+
+    let temp_dir = tempfile::tempdir().expect("temp dir");
+    let root = temp_dir.path();
+
+    write_file(
+        &root.join("Cargo.toml"),
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nlayer_0_a = { path = \"crates/layer_0_a\" }\nlayer_0_b = { path = \"crates/layer_0_b\" }\n",
+    );
+    write_file(&root.join("src/lib.rs"), "pub fn app() {}\n");
+
+    for layer in 0..LAYERS {
+        for branch in ['a', 'b'] {
+            let name = format!("layer_{layer}_{branch}");
+            let dependencies = if layer + 1 < LAYERS {
+                format!(
+                    "\n[dependencies]\nlayer_{next}_a = {{ path = \"../layer_{next}_a\" }}\nlayer_{next}_b = {{ path = \"../layer_{next}_b\" }}\n",
+                    next = layer + 1
+                )
+            } else {
+                String::new()
+            };
+            write_file(
+                &root.join(format!("crates/{name}/Cargo.toml")),
+                &format!(
+                    "[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n{dependencies}"
+                ),
+            );
+            write_file(
+                &root.join(format!("crates/{name}/src/lib.rs")),
+                "pub fn node() {}\n",
+            );
+        }
+    }
+
+    temp_dir
+}
+
 fn run_tree(root: &Path, args: &[&str]) -> Value {
     let mut cmd = cargo_bin_cmd!("cargo-upkeep");
     let mut full_args = vec!["tree", "--json"];
@@ -119,6 +250,16 @@ fn find_node<'a>(node: &'a Value, name: &str) -> Option<&'a Value> {
         .and_then(|deps| deps.iter().find_map(|child| find_node(child, name)))
 }
 
+fn find_direct_child<'a>(node: &'a Value, name: &str) -> Option<&'a Value> {
+    node.get("dependencies")
+        .and_then(Value::as_array)
+        .and_then(|dependencies| {
+            dependencies
+                .iter()
+                .find(|child| child.get("name").and_then(Value::as_str) == Some(name))
+        })
+}
+
 fn collect_nodes<'a>(node: &'a Value, nodes: &mut Vec<&'a Value>) {
     nodes.push(node);
     if let Some(deps) = node.get("dependencies").and_then(|v| v.as_array()) {
@@ -126,6 +267,98 @@ fn collect_nodes<'a>(node: &'a Value, nodes: &mut Vec<&'a Value>) {
             collect_nodes(child, nodes);
         }
     }
+}
+
+#[test]
+fn tree_expands_shared_subtree_under_each_parent() {
+    let temp_dir = create_shared_subtree_project();
+    let output = run_tree(temp_dir.path(), &[]);
+
+    for parent_name in ["normal_left", "normal_right"] {
+        let parent = find_direct_child(&output["root"], parent_name).expect("normal parent");
+        let shared = find_direct_child(parent, "shared").expect("shared dependency");
+        assert!(
+            find_direct_child(shared, "shared_leaf").is_some(),
+            "shared subtree under {parent_name} should include shared_leaf"
+        );
+        assert!(
+            find_direct_child(shared, "dup").is_some(),
+            "shared subtree under {parent_name} should include dup"
+        );
+    }
+
+    assert_eq!(output["stats"]["total_crates"], 11);
+    assert_eq!(output["stats"]["direct_deps"], 4);
+    assert_eq!(output["stats"]["transitive_deps"], 6);
+    assert_eq!(output["stats"]["duplicate_crates"], 1);
+}
+
+#[test]
+fn tree_invert_expands_converging_ancestor_subtree_on_each_branch() {
+    let temp_dir = create_shared_subtree_project();
+    let output = run_tree(temp_dir.path(), &["--invert", "reverse_target"]);
+
+    assert_eq!(output["root"]["name"], "reverse_target");
+    for parent_name in ["reverse_left", "reverse_right"] {
+        let parent = find_direct_child(&output["root"], parent_name).expect("reverse parent");
+        let hub = find_direct_child(parent, "reverse_hub").expect("repeated reverse hub");
+        assert!(
+            find_direct_child(hub, "app").is_some(),
+            "reverse_hub under {parent_name} should retain its app ancestor"
+        );
+    }
+
+    assert_eq!(output["stats"]["total_crates"], 5);
+    assert_eq!(output["stats"]["direct_deps"], 2);
+    assert_eq!(output["stats"]["transitive_deps"], 2);
+    assert_eq!(output["stats"]["duplicate_crates"], 0);
+}
+
+#[test]
+fn tree_duplicates_filter_keeps_each_shared_path_to_duplicate() {
+    let temp_dir = create_shared_subtree_project();
+    let output = run_tree(temp_dir.path(), &["--duplicates"]);
+
+    for parent_name in ["normal_left", "normal_right"] {
+        let parent = find_direct_child(&output["root"], parent_name).expect("normal parent");
+        let shared = find_direct_child(parent, "shared").expect("shared dependency");
+        let duplicate = find_direct_child(shared, "dup").expect("duplicate dependency");
+        assert_eq!(duplicate["version"], "0.1.0");
+        assert_eq!(duplicate["duplicate"], true);
+    }
+
+    let direct_duplicate = find_direct_child(&output["root"], "dup").expect("direct duplicate");
+    assert_eq!(direct_duplicate["version"], "0.2.0");
+    assert_eq!(direct_duplicate["duplicate"], true);
+    assert!(find_node(&output["root"], "shared_leaf").is_none());
+
+    assert_eq!(output["stats"]["total_crates"], 6);
+    assert_eq!(output["stats"]["direct_deps"], 3);
+    assert_eq!(output["stats"]["transitive_deps"], 2);
+    assert_eq!(output["stats"]["duplicate_crates"], 1);
+}
+
+#[test]
+fn tree_rejects_expansion_beyond_rendered_node_limit() {
+    let temp_dir = create_expanding_dag_project();
+    let mut cmd = cargo_bin_cmd!("cargo-upkeep");
+    let output = cmd
+        .current_dir(temp_dir.path())
+        .args(["tree", "--json"])
+        .output()
+        .expect("run tree");
+
+    assert!(
+        !output.status.success(),
+        "unbounded layered DAG expansion should fail"
+    );
+    let stderr = String::from_utf8(output.stderr).expect("stderr");
+    assert!(stderr.contains("rendered-node limit of 50000"), "{stderr}");
+    assert!(stderr.contains("--depth"), "{stderr}");
+
+    let depth_limited = run_tree(temp_dir.path(), &["--depth", "10"]);
+    assert_eq!(depth_limited["root"]["name"], "app");
+    assert_eq!(depth_limited["stats"]["total_crates"], 21);
 }
 
 #[test]
@@ -161,7 +394,21 @@ fn tree_duplicates_filter_keeps_duplicate_paths() {
         .filter(|node| node.get("name").and_then(|v| v.as_str()) == Some("dup"))
         .collect();
 
-    assert_eq!(dup_nodes.len(), 2);
+    assert_eq!(dup_nodes.len(), 4);
+    assert_eq!(
+        dup_nodes
+            .iter()
+            .filter(|node| node.get("version").and_then(Value::as_str) == Some("0.1.0"))
+            .count(),
+        2
+    );
+    assert_eq!(
+        dup_nodes
+            .iter()
+            .filter(|node| node.get("version").and_then(Value::as_str) == Some("0.2.0"))
+            .count(),
+        2
+    );
     assert!(dup_nodes
         .iter()
         .all(|node| node.get("duplicate").and_then(|v| v.as_bool()) == Some(true)));
@@ -265,37 +512,10 @@ fn tree_stats_reports_correct_counts() {
     let output = run_tree(root, &[]);
     let stats = &output["stats"];
 
-    // Verify stats object exists and has expected fields
-    assert!(stats.is_object(), "stats should be an object");
-
-    let total_crates = stats["total_crates"].as_u64().expect("total_crates");
-    let direct_deps = stats["direct_deps"].as_u64().expect("direct_deps");
-    let transitive_deps = stats["transitive_deps"].as_u64().expect("transitive_deps");
-    let duplicate_crates = stats["duplicate_crates"]
-        .as_u64()
-        .expect("duplicate_crates");
-
-    // The workspace has: app, dep_a, dep_b, mid, dup (2 versions), dev_only, leaf, build_only
-    // Total unique packages in tree >= direct + transitive
-    assert!(total_crates >= 1, "should have at least one crate");
-    assert!(
-        direct_deps >= 2,
-        "app has at least 2 direct deps (dep_a, dep_b)"
-    );
-    assert!(
-        transitive_deps >= 1,
-        "should have transitive deps (mid, leaf, etc.)"
-    );
-    // dup appears in 2 versions (0.1.0 via dep_a, 0.2.0 via dep_b)
-    assert!(
-        duplicate_crates >= 1,
-        "dup package has multiple versions, so duplicate_crates >= 1"
-    );
-
-    // Verify relationship: total = 1 (root) + direct + transitive (approximately)
-    // This is a sanity check, not an exact equality since counting can vary
-    assert!(
-        total_crates >= direct_deps,
-        "total_crates should be at least direct_deps"
-    );
+    // Unique packages: app, dep_a, dep_b, mid, dup (2 versions), dev_only, leaf,
+    // and build_only. The virtual root has the four workspace members as direct edges.
+    assert_eq!(stats["total_crates"], 9);
+    assert_eq!(stats["direct_deps"], 4);
+    assert_eq!(stats["transitive_deps"], 5);
+    assert_eq!(stats["duplicate_crates"], 1);
 }
