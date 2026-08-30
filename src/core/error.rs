@@ -206,7 +206,7 @@ mod tests {
 
     #[test]
     fn context_error_includes_causes() {
-        let source = std::io::Error::new(std::io::ErrorKind::Other, "disk full");
+        let source = std::io::Error::other("disk full");
         let err = UpkeepError::context(ErrorCode::Io, "write failed", source);
         assert_eq!(err.code(), ErrorCode::Io);
         assert_eq!(err.to_string(), "write failed");
@@ -219,7 +219,7 @@ mod tests {
 
     #[test]
     fn error_response_serializes_with_code_message_and_causes() {
-        let source = std::io::Error::new(std::io::ErrorKind::Other, "disk full");
+        let source = std::io::Error::other("disk full");
         let err = UpkeepError::context(ErrorCode::Metadata, "metadata read failed", source);
         let response = ErrorResponse::from(&err);
         let value = serde_json::to_value(&response).expect("serialize");

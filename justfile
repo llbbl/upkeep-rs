@@ -32,11 +32,11 @@ test-watch:
 
 # Run clippy linter
 lint:
-  cargo clippy -- -D warnings
+  cargo clippy --locked --all-targets -- -D warnings
 
 # Run clippy and fix issues
 lint-fix:
-  cargo clippy --fix --allow-dirty --allow-staged
+  cargo clippy --all-targets --fix --allow-dirty --allow-staged
 
 # Format code
 format:
