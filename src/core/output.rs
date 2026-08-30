@@ -51,6 +51,10 @@ pub struct DepsSecurityPackage {
     pub alias: Option<String>,
     pub current: String,
     pub dependency_type: DependencyType,
+    /// Workspace members that declared this dependency at this resolved version,
+    /// sorted and deduplicated. Rows for one crate at two versions are distinct
+    /// entries, so this is what says which member owns the vulnerable one.
+    pub members: Vec<String>,
     pub vulnerabilities: Vec<DepsSecurityVulnerability>,
 }
 
@@ -168,6 +172,13 @@ pub struct OutdatedPackage {
     pub required: String,
     pub update_type: UpdateType,
     pub dependency_type: DependencyType,
+    /// Workspace members that declared this dependency edge, sorted and deduplicated.
+    ///
+    /// Always populated: for a single-crate project this is the crate's own name.
+    /// Entries are grouped by `(name, current)`, so a workspace whose members resolve
+    /// the same crate to semver-incompatible versions produces one entry per version,
+    /// each naming only the members that resolved to it.
+    pub members: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -237,7 +248,7 @@ pub enum DependencyType {
     Build,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone, Copy, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum SkipReason {
     NonRegistry,
@@ -415,14 +426,23 @@ impl fmt::Display for DepsOutput {
                     Some(alias) => format!("{} ({})", alias, package.name),
                     None => package.name.clone(),
                 };
+                // The member is shown because one crate can legitimately appear on
+                // several rows at different resolved versions, and the member is what
+                // a reader has to go and edit.
+                let members = if package.members.is_empty() {
+                    "none".to_string()
+                } else {
+                    package.members.join(", ")
+                };
                 writeln!(
                     f,
-                    "- {} ({}) current {} latest {} required {}",
+                    "- {} ({}) current {} latest {} required {} members {}",
                     display_name,
                     package.dependency_type,
                     package.current,
                     package.latest,
-                    package.required
+                    package.required,
+                    members
                 )?;
             }
         }
@@ -729,6 +749,7 @@ mod tests {
                 required: "^1.0".to_string(),
                 update_type: UpdateType::Patch,
                 dependency_type: DependencyType::Normal,
+                members: vec!["demo".to_string()],
             }],
             skipped: 1,
             skipped_packages: vec![SkippedDependency {
@@ -754,6 +775,7 @@ mod tests {
                     alias: None,
                     current: "1.0.0".to_string(),
                     dependency_type: DependencyType::Normal,
+                    members: vec!["core".to_string()],
                     vulnerabilities: vec![DepsSecurityVulnerability {
                         advisory_id: "RUSTSEC-0000-0000".to_string(),
                         severity: Severity::High,
@@ -978,6 +1000,7 @@ mod tests {
                 required: "^1.0".to_string(),
                 update_type: UpdateType::Patch,
                 dependency_type: DependencyType::Normal,
+                members: vec!["demo".to_string()],
             }],
             skipped: 1,
             skipped_packages: vec![SkippedDependency {
@@ -1003,6 +1026,7 @@ mod tests {
                     alias: None,
                     current: "1.0.0".to_string(),
                     dependency_type: DependencyType::Normal,
+                    members: vec!["core".to_string()],
                     vulnerabilities: vec![DepsSecurityVulnerability {
                         advisory_id: "RUSTSEC-0000-0000".to_string(),
                         severity: Severity::High,
@@ -1027,6 +1051,9 @@ mod tests {
         assert!(text.contains("Skipped members: legacy"));
         assert!(text.contains("Outdated packages:"));
         assert!(text.contains("serde_renamed (serde)"));
+        // The declaring member is what a reader acts on, and it disambiguates rows
+        // for one crate resolved to several versions.
+        assert!(text.contains("required ^1.0 members demo"));
         assert!(text.contains("Skipped dependencies:"));
         assert!(text.contains("tokio"));
     }
