@@ -28,23 +28,41 @@ conventional_commits = true
 filter_unconventional = true
 split_commits = false
 commit_parsers = [
+    # Types that change the published artifact, so each one cuts a release.
     { message = "^feat", group = "Features" },
     { message = "^fix", group = "Bug Fixes" },
-    { message = "^doc", group = "Documentation" },
     { message = "^perf", group = "Performance" },
     { message = "^refactor", group = "Refactoring" },
-    { message = "^style", group = "Styling" },
-    { message = "^test", group = "Testing" },
+    { message = "^revert", group = "Bug Fixes" },
+    { message = "^build", group = "Miscellaneous" },
+
+    # Types that cannot change what a consumer downloads. Skipped so they never
+    # trigger a crates.io release. Note git-cliff's `skip` also drops them from the
+    # changelog. These must sit ABOVE the body-matching rules below, or a commit that
+    # merely mentions security in its body would be rescued into a release.
+    { message = "^doc", skip = true },
+    { message = "^style", skip = true },
+    { message = "^test", skip = true },
+    { message = "^ci", skip = true },
     { message = "^chore\\(release\\)", skip = true },
-    # Security-relevant work must still surface even when it lands as a
-    # chore(deps) commit, which is otherwise skipped as routine noise.
-    { body = "(?i)(rustsec|advisor|vulnerab|security)", group = "Security" },
+
+    # Routine dependency bumps are noise, but a security-relevant one must still
+    # surface and still release. Scoped to chore(deps) so it cannot rescue anything
+    # skipped above.
+    { message = "^chore\\(deps\\)", body = "(?i)(rustsec|advisor|vulnerab|security)", group = "Security" },
     { message = "^chore\\(deps\\)", skip = true },
-    { message = "^chore|^ci", group = "Miscellaneous" },
-    { body = "(?i)security", group = "Security" },
+
+    { message = "^chore", group = "Miscellaneous" },
 ]
 protect_breaking_commits = false
 filter_commits = false
 tag_pattern = "v[0-9].*"
 topo_order = false
 sort_commits = "oldest"
+
+[bump]
+# On 0.x cargo already treats a minor bump as breaking, so mapping BREAKING CHANGE
+# to minor is correct rather than a fudge. `just bump-auto` additionally caps the
+# result at minor, so a major bump is never produced automatically.
+features_always_bump_minor = true
+breaking_always_bump_major = false

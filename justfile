@@ -81,6 +81,60 @@ bump-minor:
 bump-major:
   just bump-version major
 
+# Write an explicit version to every place it appears
+set-version version:
+  #!/usr/bin/env bash
+  set -euo pipefail
+  CURRENT=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
+  NEW="{{version}}"
+  # `sed -i.bak` is the portable spelling. Bare `-i ''` is macOS-only and bare `-i`
+  # is GNU-only; this recipe runs both locally and on ubuntu in CI.
+  sed -i.bak "s/^version = \"$CURRENT\"/version = \"$NEW\"/" Cargo.toml && rm -f Cargo.toml.bak
+  # Update only this crate's own lockfile entry. `cargo generate-lockfile` re-resolves
+  # the whole graph, which can pull newer transitive deps into a release commit — and
+  # resolver v2 is not MSRV-aware, so that can silently break the declared rust-version.
+  cargo update --workspace
+  # Update skill versions
+  for skill in skills/upkeep-rs-*/SKILL.md; do
+    sed -i.bak "s/^version: .*/version: $NEW/" "$skill" && rm -f "$skill.bak"
+  done
+  echo "Set version: $CURRENT -> $NEW"
+
+# Print the next version from conventional commits, capped at minor (stdout = version only)
+next-version:
+  #!/usr/bin/env bash
+  set -euo pipefail
+  CURRENT=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
+  NEXT=$(git cliff --bumped-version 2>/dev/null | tail -1 | sed 's/^v//')
+  if [ -z "$NEXT" ]; then
+    echo "could not compute a next version from git cliff" >&2
+    exit 1
+  fi
+  IFS='.' read -r cmaj cmin _ <<< "$CURRENT"
+  IFS='.' read -r nmaj _ _ <<< "$NEXT"
+  # Never emit a major bump automatically. While the crate is 0.x this is also
+  # semantically right, because cargo already treats a 0.x minor bump as breaking.
+  if [ "$nmaj" -gt "$cmaj" ]; then
+    NEXT="$cmaj.$((cmin + 1)).0"
+    echo "warning: commits imply a major bump; capping at minor -> $NEXT" >&2
+    if [ "$cmaj" -ne 0 ]; then
+      echo "warning: the crate is past 1.0, so this cap now understates a breaking change" >&2
+    fi
+  fi
+  echo "$NEXT"
+
+# Bump the version from conventional commits, capped at minor
+bump-auto:
+  #!/usr/bin/env bash
+  set -euo pipefail
+  CURRENT=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
+  NEXT=$(just next-version)
+  if [ "$NEXT" = "$CURRENT" ]; then
+    echo "No releasable commits since v$CURRENT; nothing to bump."
+    exit 0
+  fi
+  just set-version "$NEXT"
+
 # Bump version by type (patch, minor, major)
 bump-version bump:
   #!/usr/bin/env bash
@@ -93,15 +147,7 @@ bump-version bump:
     major) major=$((major + 1)); minor=0; patch=0 ;;
     *) echo "Invalid bump type: {{bump}}"; exit 1 ;;
   esac
-  NEW="$major.$minor.$patch"
-  sed -i '' "s/^version = \"$CURRENT\"/version = \"$NEW\"/" Cargo.toml
-  # Regenerate lockfile with new version
-  cargo generate-lockfile
-  # Update skill versions
-  for skill in skills/upkeep-rs-*/SKILL.md; do
-    sed -i '' "s/^version: .*/version: $NEW/" "$skill"
-  done
-  echo "Bumped version: $CURRENT -> $NEW"
+  just set-version "$major.$minor.$patch"
 
 # Commit version bump and create tag
 commit-version:
