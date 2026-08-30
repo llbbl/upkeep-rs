@@ -1,0 +1,139 @@
+name: Auto Release
+
+# Computes the next version from conventional commits on every push to main, then
+# tags and releases it. Merging a PR that contains a releasable commit therefore
+# publishes to crates.io, which cannot be undone — only yanked.
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+concurrency:
+  # Never let two releases race; a second push waits rather than tagging concurrently.
+  group: auto-release
+  cancel-in-progress: false
+
+jobs:
+  bump:
+    name: Compute version
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.compute.outputs.tag }}
+      release: ${{ steps.compute.outputs.release }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # git-cliff needs full history and tags to work out the bump.
+          fetch-depth: 0
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install just and git-cliff
+        uses: taiki-e/install-action@v2
+        with:
+          tool: just,git-cliff
+
+      - name: Compute next version
+        id: compute
+        run: |
+          set -euo pipefail
+          # The release commit this job pushes would otherwise re-enter here. A push
+          # made with GITHUB_TOKEN does not trigger workflows, so this is
+          # belt-and-braces — but it keeps the loop closed if the token is ever
+          # swapped for a PAT. Read from git rather than the event payload: commit
+          # messages are attacker-influenced and must never reach an expression or
+          # a shell unquoted.
+          head_subject=$(git log -1 --format=%s)
+          case "$head_subject" in
+            'chore(release):'*)
+              echo "Head is a release commit; nothing to do."
+              echo "release=false" >> "$GITHUB_OUTPUT"
+              exit 0
+              ;;
+          esac
+          current=$(just show-version)
+          # `current` comes from Cargo.toml but `next` is computed from tags. If those
+          # two sources have drifted — e.g. someone bumped locally and pushed the
+          # branch without its tag — the release could silently move the manifest
+          # BACKWARDS and publish it, since verify only checks tag == manifest and
+          # both would agree on the wrong value.
+          last_tag=$(git describe --tags --abbrev=0)
+          if [ "$last_tag" != "v${current}" ]; then
+            echo "::error::Cargo.toml says ${current} but the last tag is ${last_tag}; refusing to release"
+            exit 1
+          fi
+          # `next-version` prints only the version on stdout; the major-bump cap
+          # warning goes to stderr, so it shows in the log without polluting this.
+          next=$(just next-version)
+          echo "current=$current next=$next"
+          # Only ever move forward.
+          if [ "$current" != "$next" ] && \
+             [ "$(printf '%s\n%s\n' "$current" "$next" | sort -V | tail -1)" != "$next" ]; then
+            echo "::error::computed ${next} is not ahead of ${current}; refusing to release"
+            exit 1
+          fi
+          if [ "$current" = "$next" ]; then
+            echo "No releasable commits since v${current}; nothing to release."
+            echo "release=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "release=true" >> "$GITHUB_OUTPUT"
+            echo "tag=v${next}" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Runs before tagging on purpose: release.yml's own verify job only runs after
+      # the tag is pushed, so a failure there would strand an unreleasable tag.
+      - name: Verify before tagging
+        if: steps.compute.outputs.release == 'true'
+        run: just check
+        env:
+          UPKEEP_REQUIRE_NETWORK_TESTS: "1"
+
+      - name: Apply version bump
+        if: steps.compute.outputs.release == 'true'
+        run: just set-version "${TAG#v}"
+        env:
+          TAG: ${{ steps.compute.outputs.tag }}
+
+      - name: Regenerate changelog
+        if: steps.compute.outputs.release == 'true'
+        run: git cliff --tag "$TAG" -o CHANGELOG.md
+        env:
+          TAG: ${{ steps.compute.outputs.tag }}
+
+      - name: Commit and tag
+        if: steps.compute.outputs.release == 'true'
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # CHANGELOG.md is staged explicitly: `just commit-version` only stages
+          # Cargo.toml, Cargo.lock and the SKILL.md files.
+          git add CHANGELOG.md
+          just commit-version
+          # MUST be atomic. A plain `git push origin main --tags` updates each ref
+          # independently, so a concurrent merge makes main non-fast-forward while the
+          # tag still lands — leaving an orphan tag that wedges every later run on
+          # "tag already exists". Both refs land or neither does.
+          git push --atomic origin main "refs/tags/$TAG"
+        env:
+          TAG: ${{ steps.compute.outputs.tag }}
+
+  release:
+    name: Release
+    needs: bump
+    if: needs.bump.outputs.release == 'true'
+    # A tag pushed with GITHUB_TOKEN does not fire release.yml's push trigger, so the
+    # release is invoked directly instead of relying on the tag push.
+    #
+    # If GITHUB_TOKEN is ever swapped for a PAT, the tag push WOULD fire release.yml's
+    # push trigger as well, running the release twice concurrently on the same tag.
+    # Add a guard to release.yml's push trigger before making that change.
+    uses: ./.github/workflows/release.yml
+    with:
+      tag: ${{ needs.bump.outputs.tag }}
+    secrets: inherit

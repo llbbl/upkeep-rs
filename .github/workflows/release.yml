@@ -4,9 +4,23 @@ on:
   push:
     tags:
       - "v*"
+  # Called by auto-release.yml after it computes and pushes a tag. A tag pushed with
+  # the default GITHUB_TOKEN does not trigger workflows, so the handoff is an explicit
+  # call rather than relying on the push trigger above.
+  workflow_call:
+    inputs:
+      tag:
+        description: The tag to release, including the leading v.
+        required: true
+        type: string
 
 permissions:
   contents: write
+
+env:
+  # The tag being released, whichever trigger fired. When called, github.ref_name is
+  # the caller's branch, not the tag, so inputs.tag has to win.
+  RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
 
 jobs:
   verify:
@@ -15,13 +29,15 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
       # Fail before building five platforms if the tag and the manifest disagree.
       # `cargo publish` would otherwise publish whatever version the manifest says,
       # which is not necessarily the version the tag names.
       - name: Verify tag matches Cargo.toml version
         run: |
           set -euo pipefail
-          tag="${GITHUB_REF_NAME#v}"
+          tag="${RELEASE_TAG#v}"
           # Without `|| true` a non-matching grep aborts the assignment under `bash -e`
           # and the ::error:: below never prints.
           manifest=$(grep '^version = ' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/' || true)
@@ -30,10 +46,10 @@ jobs:
             exit 1
           fi
           if [ "$tag" != "$manifest" ]; then
-            echo "::error::tag ${GITHUB_REF_NAME} does not match Cargo.toml version ${manifest}"
+            echo "::error::tag ${RELEASE_TAG} does not match Cargo.toml version ${manifest}"
             exit 1
           fi
-          echo "tag ${GITHUB_REF_NAME} matches Cargo.toml version ${manifest}"
+          echo "tag ${RELEASE_TAG} matches Cargo.toml version ${manifest}"
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -59,6 +75,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
       - name: Read MSRV from Cargo.toml
         id: msrv
         run: echo "version=$(grep '^rust-version = ' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')" >> "$GITHUB_OUTPUT"
@@ -107,6 +125,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -160,6 +180,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
+          ref: ${{ env.RELEASE_TAG }}
           fetch-depth: 0
       - name: Download artifacts
         uses: actions/download-artifact@v4
@@ -177,6 +198,7 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ env.RELEASE_TAG }}
           files: dist/**
           body: ${{ steps.changelog.outputs.content }}
           draft: false
@@ -189,6 +211,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
       # `cargo publish` waits for the index to sync and can time out AFTER the upload
