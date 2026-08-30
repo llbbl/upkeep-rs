@@ -829,7 +829,7 @@ mod tests {
     // super::*` above would otherwise make which one is meant ambiguous.
     use crate::core::scorers::quality::{
         score_quality, Availability, ClippySummary, DependencyFreshness, MsrvStatus, QualityInputs,
-        SecuritySummary, UnsafeSummary as ScoredUnsafe,
+        SecuritySummary, UnsafeSummary as ScoredUnsafe, UnusedSummary,
     };
     use serde_json::Value;
 
@@ -837,6 +837,35 @@ mod tests {
         value
             .get(key)
             .unwrap_or_else(|| panic!("missing key {key}"))
+    }
+
+    fn serialized_value<T: Serialize>(output: &T) -> Value {
+        let json = serde_json::to_string(output).expect("serialize output fixture");
+        serde_json::from_str(&json).expect("parse serialized output fixture")
+    }
+
+    fn documented_json_example(documentation: &str, command: &str) -> Value {
+        let marker = format!("<!-- cargo-upkeep-example:{command} -->");
+        assert_eq!(
+            documentation.matches(&marker).count(),
+            1,
+            "{command}: expected exactly one {marker} marker in docs/commands.md"
+        );
+
+        let (_, after_marker) = documentation
+            .split_once(&marker)
+            .unwrap_or_else(|| panic!("{command}: missing {marker} marker in docs/commands.md"));
+        let fenced = after_marker.trim_start();
+        let json_with_fence = fenced.strip_prefix("```json\n").unwrap_or_else(|| {
+            panic!("{command}: marker must be followed by a fenced `json` block")
+        });
+        let (json, _) = json_with_fence
+            .split_once("\n```")
+            .unwrap_or_else(|| panic!("{command}: JSON example is missing its closing code fence"));
+
+        serde_json::from_str(json).unwrap_or_else(|error| {
+            panic!("{command}: documented example is invalid JSON: {error}")
+        })
     }
 
     /// Every analyzer down, scored the way production scores it.
@@ -880,19 +909,19 @@ mod tests {
     }
 
     #[test]
-    fn serialize_outputs() {
+    fn documented_json_examples_match_output_contracts() {
         let detect = DetectOutput {
             edition: Some("2021".to_string()),
             msrv: Some("1.70".to_string()),
             workspace: true,
-            members: vec!["core".to_string()],
+            members: vec!["core".to_string(), "upkeep".to_string()],
             package: Some("upkeep".to_string()),
             version: Some("0.1.0".to_string()),
             dependencies: 3,
             features: vec!["default".to_string()],
-            targets: vec!["x86_64-apple-darwin".to_string()],
+            targets: vec!["bin".to_string()],
             tooling: vec!["clippy".to_string()],
-            ci: vec!["github".to_string()],
+            ci: vec!["github-actions".to_string()],
         };
 
         let audit = AuditOutput {
@@ -918,9 +947,9 @@ mod tests {
             total: 2,
             checked: 2,
             outdated: 1,
-            major: 1,
+            major: 0,
             minor: 0,
-            patch: 0,
+            patch: 1,
             packages: vec![OutdatedPackage {
                 name: "serde".to_string(),
                 alias: None,
@@ -929,7 +958,7 @@ mod tests {
                 required: "^1.0".to_string(),
                 update_type: UpdateType::Patch,
                 dependency_type: DependencyType::Normal,
-                members: vec!["demo".to_string()],
+                members: vec!["core".to_string()],
             }],
             skipped: 1,
             skipped_packages: vec![SkippedDependency {
@@ -941,7 +970,10 @@ mod tests {
                 source: None,
                 target: Some("x86_64-unknown-linux-gnu".to_string()),
             }],
-            warnings: vec!["rustsec unavailable".to_string()],
+            warnings: vec![
+                "security scan uses Cargo.lock and reports direct workspace dependencies only"
+                    .to_string(),
+            ],
             security: Some(DepsSecurityOutput {
                 summary: AuditSummary {
                     critical: 0,
@@ -1029,28 +1061,39 @@ mod tests {
             },
         };
 
-        let quality = QualityOutput {
-            score: Some(92.5),
-            grade: Some(Grade::A),
-            complete: true,
-            measured_weight: 1.0,
-            breakdown: vec![MetricScore {
-                name: "Security".to_string(),
-                score: Some(90.0),
-                weight: 0.25,
-            }],
-            unavailable: Vec::new(),
-            recommendations: vec!["Address security advisories.".to_string()],
-        };
+        let quality = score_quality(QualityInputs {
+            dependency_freshness: Availability::Measured(DependencyFreshness {
+                total: 10,
+                outdated: 1,
+            }),
+            security: Availability::Measured(SecuritySummary {
+                critical: 0,
+                high: 0,
+                moderate: 0,
+                low: 0,
+            }),
+            unused: Availability::Measured(UnusedSummary { unused_count: 0 }),
+            unsafe_code: Availability::not_installed(
+                "cargo-geiger is not installed; install with `cargo install cargo-geiger`",
+            ),
+            clippy: Availability::Measured(ClippySummary {
+                warnings: 0,
+                errors: 0,
+            }),
+            msrv: Availability::Measured(MsrvStatus::Valid),
+        });
+        assert_eq!(quality.breakdown.len(), 6);
+        assert_eq!(quality.unavailable.len(), 1);
+        assert!(quality.recommendations.is_empty());
 
-        let detect_value = serde_json::to_value(&detect).unwrap();
+        let detect_value = serialized_value(&detect);
         assert_eq!(value_at(&detect_value, "workspace"), &Value::Bool(true));
         assert_eq!(
             value_at(&detect_value, "members")[0],
             Value::String("core".into())
         );
 
-        let audit_value = serde_json::to_value(&audit).unwrap();
+        let audit_value = serialized_value(&audit);
         assert_eq!(
             value_at(&audit_value, "summary")["high"],
             Value::Number(1.into())
@@ -1064,20 +1107,20 @@ mod tests {
             Value::String("RUSTSEC-0000-0000".into())
         );
 
-        let deps_value = serde_json::to_value(&deps).unwrap();
+        let deps_value = serialized_value(&deps);
         assert_eq!(value_at(&deps_value, "outdated"), &Value::Number(1.into()));
         assert_eq!(
             value_at(&deps_value, "security")["packages"][0]["vulnerabilities"][0]["advisory_id"],
             Value::String("RUSTSEC-0000-0000".into())
         );
 
-        let unused_value = serde_json::to_value(&unused).unwrap();
+        let unused_value = serialized_value(&unused);
         assert_eq!(
             value_at(&unused_value, "unused")[0]["confidence"],
             Value::String("high".into())
         );
 
-        let unsafe_value = serde_json::to_value(&unsafe_output).unwrap();
+        let unsafe_value = serialized_value(&unsafe_output);
         assert_eq!(
             value_at(&unsafe_value, "summary")["total_unsafe"],
             Value::Number(7.into())
@@ -1087,7 +1130,7 @@ mod tests {
             Value::String("ffi".into())
         );
 
-        let tree_value = serde_json::to_value(&tree).unwrap();
+        let tree_value = serialized_value(&tree);
         assert_eq!(
             value_at(&tree_value, "stats")["direct_deps"],
             Value::Number(1.into())
@@ -1097,15 +1140,40 @@ mod tests {
             Value::String("dep".into())
         );
 
-        let quality_value = serde_json::to_value(&quality).unwrap();
+        let quality_value = serialized_value(&quality);
         assert_eq!(
             value_at(&quality_value, "grade"),
             &Value::String("A".into())
         );
         assert_eq!(
             value_at(&quality_value, "breakdown")[0]["name"],
-            Value::String("Security".into())
+            Value::String("Dependency freshness".into())
         );
+
+        let documentation_path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/commands.md");
+        let documentation = std::fs::read_to_string(&documentation_path).unwrap_or_else(|error| {
+            panic!(
+                "could not read documented JSON contracts from {}: {error}",
+                documentation_path.display()
+            )
+        });
+
+        for (command, expected) in [
+            ("detect", detect_value),
+            ("deps", deps_value),
+            ("audit", audit_value),
+            ("quality", quality_value),
+            ("tree", tree_value),
+            ("unused", unused_value),
+            ("unsafe-code", unsafe_value),
+        ] {
+            let documented = documented_json_example(&documentation, command);
+            assert_eq!(
+                documented, expected,
+                "{command}: docs/commands.md JSON example drifted from its serialized output contract"
+            );
+        }
     }
 
     #[test]
