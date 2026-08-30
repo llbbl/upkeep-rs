@@ -232,7 +232,7 @@ pub enum Severity {
     Low,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum UpdateType {
     Major,

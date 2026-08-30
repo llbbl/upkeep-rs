@@ -110,8 +110,8 @@ cargo upkeep deps --json
   "total": 10,
   "outdated": 1,
   "major": 0,
-  "minor": 1,
-  "patch": 0,
+  "minor": 0,
+  "patch": 1,
   "packages": [
     {
       "name": "serde",
@@ -119,7 +119,7 @@ cargo upkeep deps --json
       "current": "1.0.197",
       "latest": "1.0.204",
       "required": "^1.0",
-      "update_type": "minor",
+      "update_type": "patch",
       "dependency_type": "normal",
       "members": ["my-crate"]
     }
@@ -132,6 +132,21 @@ cargo upkeep deps --json
   "skipped_members": []
 }
 ```
+
+`update_type` follows cargo's compatibility rule rather than raw semver field
+comparison: the leftmost non-zero component is the one that carries breakage.
+
+| Current | Latest | `update_type` | Why |
+|---------|--------|---------------|-----|
+| `1.2.3` | `2.0.0` | `major` | major differs |
+| `1.2.3` | `1.3.0` | `minor` | compatible feature bump |
+| `1.2.3` | `1.2.4` | `patch` | compatible fix |
+| `0.8.5` | `0.10.2` | `major` | for `0.x` the minor carries breakage |
+| `0.8.1` | `0.8.5` | `patch` | compatible within `0.8` |
+| `0.0.1` | `0.0.2` | `major` | nothing is compatible under `0.0.z` |
+
+So a `0.x` dependency moving to a new minor is reported `major`, because cargo
+will not take that upgrade without a manifest change.
 
 Entries are grouped by `(name, current)` and sorted by that pair. Each entry's
 `members` array names the workspace members that declared it, sorted and
