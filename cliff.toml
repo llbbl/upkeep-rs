@@ -36,9 +36,12 @@ commit_parsers = [
     { message = "^style", group = "Styling" },
     { message = "^test", group = "Testing" },
     { message = "^chore\\(release\\)", skip = true },
+    # Security-relevant work must still surface even when it lands as a
+    # chore(deps) commit, which is otherwise skipped as routine noise.
+    { body = "(?i)(rustsec|advisor|vulnerab|security)", group = "Security" },
     { message = "^chore\\(deps\\)", skip = true },
     { message = "^chore|^ci", group = "Miscellaneous" },
-    { body = ".*security", group = "Security" },
+    { body = "(?i)security", group = "Security" },
 ]
 protect_breaking_commits = false
 filter_commits = false
