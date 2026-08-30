@@ -630,8 +630,31 @@ fn missing_registry_skip(
     }
 }
 
+/// Whether cargo considers `latest` a semver-incompatible upgrade from `current`.
+///
+/// Cargo's rule is that the leftmost non-zero component must match, so which
+/// component carries breakage depends on the version's shape: `1.x` breaks on the
+/// major, `0.x` breaks on the minor, and `0.0.z` breaks on every patch.
+fn is_semver_breaking(current: &Version, latest: &Version) -> bool {
+    if current.major != latest.major {
+        return true;
+    }
+    if current.major != 0 {
+        return false;
+    }
+    // 0.x: the minor is the leftmost non-zero component, so `0.8 -> 0.10` breaks.
+    if current.minor != latest.minor {
+        return true;
+    }
+    if current.minor != 0 {
+        return false;
+    }
+    // 0.0.z: nothing is compatible, so every patch bump breaks.
+    current.patch != latest.patch
+}
+
 fn classify_update(current: &Version, latest: &Version) -> UpdateType {
-    if latest.major > current.major {
+    if is_semver_breaking(current, latest) {
         UpdateType::Major
     } else if latest.minor > current.minor {
         UpdateType::Minor
@@ -798,23 +821,33 @@ mod tests {
 
     #[test]
     fn classify_update_detects_major_minor_patch() {
-        let current = Version::new(1, 2, 3);
-        let major = Version::new(2, 0, 0);
-        let minor = Version::new(1, 3, 0);
-        let patch = Version::new(1, 2, 4);
+        // Cargo compatibility is decided by the leftmost non-zero component, so the
+        // component that carries breakage moves with the version's shape.
+        let cases: &[(&str, &str, UpdateType)] = &[
+            // 1.x: the major carries breakage.
+            ("1.2.3", "2.0.0", UpdateType::Major),
+            ("1.2.3", "1.3.0", UpdateType::Minor),
+            ("1.2.3", "1.2.4", UpdateType::Patch),
+            // 0.x: the minor carries it. These were all reported Minor before.
+            ("0.8.5", "0.10.2", UpdateType::Major),
+            ("0.1.0", "0.2.0", UpdateType::Major),
+            ("0.8.1", "0.8.5", UpdateType::Patch),
+            // Leaving 0.x entirely is breaking too.
+            ("0.9.0", "1.0.0", UpdateType::Major),
+            // 0.0.z: nothing is compatible. This was reported Patch before.
+            ("0.0.1", "0.0.2", UpdateType::Major),
+            ("0.0.1", "0.1.0", UpdateType::Major),
+        ];
 
-        assert!(matches!(
-            classify_update(&current, &major),
-            UpdateType::Major
-        ));
-        assert!(matches!(
-            classify_update(&current, &minor),
-            UpdateType::Minor
-        ));
-        assert!(matches!(
-            classify_update(&current, &patch),
-            UpdateType::Patch
-        ));
+        for (current, latest, expected) in cases {
+            let current = Version::parse(current).expect("parse current");
+            let latest = Version::parse(latest).expect("parse latest");
+            let actual = classify_update(&current, &latest);
+            assert_eq!(
+                &actual, expected,
+                "{current} -> {latest} classified {actual:?}, expected {expected:?}"
+            );
+        }
     }
 
     #[test]
@@ -1307,10 +1340,10 @@ mod tests {
                 .expect("process dependencies");
 
         assert_eq!(packages.len(), 2);
-        // `classify_update` compares raw semver fields, so a 0.x bump counts as minor.
-        // That predates this change and is left as-is here.
-        assert_eq!(minor, 2);
-        assert_eq!((major, patch), (0, 0));
+        // Both edges are 0.x moving to a new minor, which cargo treats as breaking,
+        // so each counts as a major update.
+        assert_eq!(major, 2);
+        assert_eq!((minor, patch), (0, 0));
         assert_eq!(packages[0].current, "0.8.5");
         assert_eq!(packages[0].members, vec!["core-lib".to_string()]);
         assert_eq!(packages[1].current, "0.9.2");
