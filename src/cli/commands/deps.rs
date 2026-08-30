@@ -187,6 +187,8 @@ struct MemberVersions {
     /// fallback in [`resolve_current_version`], reached after both `by_dep_name`
     /// lookups miss; a renamed edge never consults it at all.
     by_package_name: HashMap<String, Version>,
+    /// Package names with more than one resolved version are unsafe fallbacks.
+    ambiguous_package_names: HashSet<String>,
 }
 
 fn build_resolved_versions(
@@ -210,10 +212,19 @@ fn build_resolved_versions(
                     versions
                         .by_dep_name
                         .insert(dep.name.to_string(), package.version.clone());
-                    versions
-                        .by_package_name
-                        .entry(package.name.to_string())
-                        .or_insert_with(|| package.version.clone());
+                    let package_name = package.name.to_string();
+                    match versions.by_package_name.get(&package_name).cloned() {
+                        None => {
+                            versions
+                                .by_package_name
+                                .insert(package_name, package.version.clone());
+                        }
+                        Some(existing) if existing != package.version => {
+                            versions.by_package_name.remove(&package_name);
+                            versions.ambiguous_package_names.insert(package_name);
+                        }
+                        Some(_) => {}
+                    }
                 }
             }
             versions
@@ -597,7 +608,13 @@ fn resolve_current_version(
         // -> `pretty_assertions`).
         .or_else(|| versions.by_dep_name.get(&dep_name.replace('-', "_")))
         // Last resort: a crate with a custom `[lib] name` matching neither.
-        .or_else(|| versions.by_package_name.get(dep_name))
+        .or_else(|| {
+            if versions.ambiguous_package_names.contains(dep_name) {
+                None
+            } else {
+                versions.by_package_name.get(dep_name)
+            }
+        })
         .cloned()
 }
 
@@ -910,6 +927,22 @@ mod tests {
 
         let resolved = resolve_current_version(None, "odd-crate", &versions);
         assert_eq!(resolved, Some(Version::new(1, 4, 0)));
+    }
+
+    #[test]
+    fn resolve_current_version_fails_closed_for_ambiguous_custom_lib_package() {
+        let mut versions = MemberVersions {
+            member: "member".to_string(),
+            ..MemberVersions::default()
+        };
+        versions
+            .ambiguous_package_names
+            .insert("odd-crate".to_string());
+        versions
+            .by_package_name
+            .insert("odd-crate".to_string(), Version::new(1, 4, 0));
+
+        assert_eq!(resolve_current_version(None, "odd-crate", &versions), None);
     }
 
     #[test]
