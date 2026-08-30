@@ -1,0 +1,431 @@
+# Command reference
+
+All examples below use the recommended cargo-subcommand form, `cargo upkeep <command>`. For the direct binary form and compatibility alias, see [docs/spec.md#cli-contract](./spec.md#cli-contract).
+
+## Global flags
+
+Every command accepts:
+
+- `-v`, `--verbose`
+- `--json`
+- `--log-level <level>`
+
+## detect
+
+Detect workspace, package, tooling, and CI metadata for the current project.
+
+```bash
+cargo upkeep detect --json
+```
+
+<!-- cargo-upkeep-example:detect -->
+```json
+{
+  "edition": "2021",
+  "msrv": "1.70",
+  "workspace": true,
+  "members": [
+    "core",
+    "upkeep"
+  ],
+  "package": "upkeep",
+  "version": "0.1.0",
+  "dependencies": 3,
+  "features": [
+    "default"
+  ],
+  "targets": [
+    "bin"
+  ],
+  "tooling": [
+    "clippy"
+  ],
+  "ci": [
+    "github-actions"
+  ]
+}
+```
+
+## deps
+
+Report outdated dependencies and classify each update as `major`, `minor`, or `patch`. Add `--security` to attach RustSec findings for direct workspace dependencies resolved through `Cargo.lock`.
+
+```bash
+cargo upkeep deps --json --security
+```
+
+<!-- cargo-upkeep-example:deps -->
+```json
+{
+  "total": 2,
+  "checked": 2,
+  "outdated": 1,
+  "major": 0,
+  "minor": 0,
+  "patch": 1,
+  "packages": [
+    {
+      "name": "serde",
+      "alias": null,
+      "current": "1.0.0",
+      "latest": "1.0.1",
+      "required": "^1.0",
+      "update_type": "patch",
+      "dependency_type": "normal",
+      "members": [
+        "core"
+      ]
+    }
+  ],
+  "skipped": 1,
+  "skipped_packages": [
+    {
+      "name": "serde",
+      "alias": null,
+      "required": "^1.0",
+      "reason": "target_specific",
+      "dependency_type": "normal",
+      "source": null,
+      "target": "x86_64-unknown-linux-gnu"
+    }
+  ],
+  "warnings": [
+    "security scan uses Cargo.lock and reports direct workspace dependencies only"
+  ],
+  "security": {
+    "summary": {
+      "critical": 0,
+      "high": 1,
+      "moderate": 0,
+      "low": 0,
+      "total": 1
+    },
+    "packages": [
+      {
+        "name": "serde",
+        "alias": null,
+        "current": "1.0.0",
+        "dependency_type": "normal",
+        "members": [
+          "core"
+        ],
+        "vulnerabilities": [
+          {
+            "advisory_id": "RUSTSEC-0000-0000",
+            "severity": "high",
+            "title": "Example",
+            "fix_available": true
+          }
+        ]
+      }
+    ]
+  },
+  "workspace": true,
+  "members": [
+    "core"
+  ],
+  "skipped_members": [
+    "legacy"
+  ]
+}
+```
+
+Notes:
+
+- `--security` requires `Cargo.lock`. If it is missing, generate it with `cargo generate-lockfile` before rerunning the command.
+- `--security` adds the advisory summary and package list, and warns that the scan is lockfile-based and limited to direct workspace dependencies.
+
+### How to read `total` and `checked`
+
+`total` counts declared dependency edges: each declaration by each workspace member, with no deduplication across normal, build, or dev sections.
+
+`checked` counts the grouped freshness comparisons that actually reached an answer. The grouping key is `(name, resolved version)`, which means one crate declared twice can still count as one checked dependency, and one crate resolved to two versions in a workspace can count as two.
+
+Because those are different units, `total - skipped` is not a valid substitute for `checked`. Subtracting a grouped skip count from an edge count can invent comparisons that never happened.
+
+### Update classification
+
+`update_type` follows Cargo compatibility rules, not raw semver field names. The leftmost non-zero component is the breaking boundary.
+
+| Current | Latest | `update_type` | Why |
+| --- | --- | --- | --- |
+| `1.2.3` | `2.0.0` | `major` | major differs |
+| `1.2.3` | `1.3.0` | `minor` | compatible feature bump |
+| `1.2.3` | `1.2.4` | `patch` | compatible fix |
+| `0.8.5` | `0.10.2` | `major` | in `0.x`, the minor carries breakage |
+| `0.8.1` | `0.8.5` | `patch` | compatible within `0.8` |
+| `0.0.1` | `0.0.2` | `major` | nothing is compatible under `0.0.z` |
+
+### Grouping and workspace attribution
+
+- `packages` are grouped by `(name, current)` and sorted by that pair.
+- `members` on each package entry names the workspace members that actually resolved to that version.
+- If two workspace members resolve the same crate name to semver-incompatible versions, `deps` emits one row per resolved version.
+- When several edges collapse into one grouped row, `required` and `alias` come from one representative edge: the smallest `(member, required, alias)` tuple.
+- If a grouped row spans several dependency kinds, `dependency_type` follows the precedence `normal > build > dev`.
+
+### Registry failures and denominator rules
+
+Some skipped dependencies are still considered checked because there was no meaningful registry comparison to make, such as `non_registry`, `target_specific`, and `optional_not_activated`. Others, such as `registry_unavailable` and `registry_metadata_missing`, mean the freshness question was never answered and are excluded from `checked`.
+
+That distinction is what `quality` uses for dependency freshness. If the registry could not answer, the denominator shrinks; those dependencies do not become implicitly healthy.
+
+## audit
+
+Report RustSec advisories for the resolved lockfile.
+
+```bash
+cargo upkeep audit --json
+```
+
+<!-- cargo-upkeep-example:audit -->
+```json
+{
+  "vulnerabilities": [
+    {
+      "id": "RUSTSEC-0000-0000",
+      "package": "serde",
+      "package_version": "1.0.0",
+      "severity": "high",
+      "title": "Example",
+      "path": [
+        "root",
+        "serde"
+      ],
+      "fix_available": true
+    }
+  ],
+  "summary": {
+    "critical": 0,
+    "high": 1,
+    "moderate": 0,
+    "low": 0,
+    "total": 1
+  }
+}
+```
+
+Scope notes:
+
+- Advisories are matched against resolved crates.io dependencies from the lockfile.
+- Path, git, vendored, and alternate-registry dependencies are not reported as advisory matches.
+- The same effective RustSec scope applies to `deps --security` and to the security metric inside `quality`.
+
+## quality
+
+Compute a weighted project-health grade across dependency freshness, security, unused dependencies, unsafe code, clippy, and the declared Rust version contract.
+
+```bash
+cargo upkeep quality --json
+```
+
+<!-- cargo-upkeep-example:quality -->
+```json
+{
+  "score": 97.65,
+  "grade": "A",
+  "complete": false,
+  "measured_weight": 0.85,
+  "breakdown": [
+    {
+      "name": "Dependency freshness",
+      "score": 90.0,
+      "weight": 0.2
+    },
+    {
+      "name": "Security",
+      "score": 100.0,
+      "weight": 0.25
+    },
+    {
+      "name": "Unused dependencies",
+      "score": 100.0,
+      "weight": 0.15
+    },
+    {
+      "name": "Unsafe code",
+      "score": null,
+      "weight": 0.15
+    },
+    {
+      "name": "Clippy",
+      "score": 100.0,
+      "weight": 0.15
+    },
+    {
+      "name": "MSRV",
+      "score": 100.0,
+      "weight": 0.1
+    }
+  ],
+  "unavailable": [
+    {
+      "name": "Unsafe code",
+      "weight": 0.15,
+      "reason": "not_installed",
+      "detail": "cargo-geiger is not installed; install with `cargo install cargo-geiger`"
+    }
+  ],
+  "recommendations": []
+}
+```
+
+Notes:
+
+- `complete` tells you whether every metric ran.
+- `measured_weight` tells you how much of the total grade weight is actually represented.
+- When a metric cannot run, `breakdown[].score` is `null` for that metric and the metric also appears under `unavailable`.
+
+### How partial results work
+
+`quality` scores only the metrics that actually ran, then renormalizes that weighted total back onto a 0-100 scale. Unavailable metrics give neither penalty nor credit: their weight leaves the denominator entirely.
+
+That is why `complete` and `measured_weight` are contract fields, not decoration. A partial `A` is only meaningful alongside how much of the total weight was actually measured.
+
+### `not_installed` vs `failed`
+
+- `not_installed` means an optional external tool such as `cargo-machete` or `cargo-geiger` is absent.
+- `failed` means the analyzer ran but could not produce a valid measurement.
+
+Those cases should be handled differently by callers, but neither one should be mistaken for a healthy project metric.
+
+### No measurement means no score
+
+If nothing at all can be measured, `score` and `grade` are `null`. The command does not substitute a default number because any number would read as a real grade.
+
+### Recommendation ordering
+
+`recommendations` are ordered by weighted impact, not by raw metric score. A slightly weaker high-weight metric can outrank a much worse low-weight metric because it changes the overall grade more.
+
+### Freshness inside `quality`
+
+The dependency freshness metric uses the grouped `checked` subset from `deps`, not declared edges and not `total - skipped`. Registry failures therefore reduce coverage instead of inflating freshness.
+
+### CI guidance
+
+Do not gate CI on `grade` alone. Gate on `complete == true`, or on a `measured_weight` threshold you explicitly accept in your pipeline.
+
+## tree
+
+Render a dependency tree with optional depth limits, duplicate-only filtering, reverse lookups, feature expansion, and dev-dependency suppression.
+
+```bash
+cargo upkeep tree --json --features
+```
+
+Flags:
+
+- `--depth <depth>`
+- `--duplicates`
+- `--invert <crate>`
+- `--features`
+- `--no-dev`
+
+<!-- cargo-upkeep-example:tree -->
+```json
+{
+  "root": {
+    "name": "root",
+    "version": "0.1.0",
+    "package_id": "root 0.1.0",
+    "features": [
+      "default"
+    ],
+    "dependencies": [
+      {
+        "name": "dep",
+        "version": "1.2.3",
+        "package_id": "dep 1.2.3",
+        "features": [],
+        "dependencies": [],
+        "is_dev": false,
+        "is_build": false,
+        "duplicate": false
+      }
+    ],
+    "is_dev": false,
+    "is_build": false,
+    "duplicate": false
+  },
+  "stats": {
+    "total_crates": 2,
+    "direct_deps": 1,
+    "transitive_deps": 0,
+    "duplicate_crates": 0
+  }
+}
+```
+
+## unused
+
+Normalize `cargo-machete` findings into a stable JSON shape.
+
+```bash
+cargo upkeep unused --json
+```
+
+`unused` requires `cargo-machete` to be installed:
+
+```bash
+cargo install cargo-machete
+```
+
+<!-- cargo-upkeep-example:unused -->
+```json
+{
+  "unused": [
+    {
+      "name": "tokio",
+      "dependency_type": "dev",
+      "confidence": "high"
+    }
+  ],
+  "possibly_unused": [
+    "serde"
+  ]
+}
+```
+
+## unsafe-code
+
+Normalize `cargo-geiger` findings into a stable JSON shape.
+
+```bash
+cargo upkeep unsafe-code --json
+```
+
+`cargo upkeep unsafe --json` is supported as an alias for the same command.
+
+`unsafe-code` requires `cargo-geiger` to be installed:
+
+```bash
+cargo install cargo-geiger
+```
+
+<!-- cargo-upkeep-example:unsafe-code -->
+```json
+{
+  "summary": {
+    "packages": 1,
+    "unsafe_functions": 2,
+    "unsafe_impls": 1,
+    "unsafe_traits": 0,
+    "unsafe_blocks": 3,
+    "unsafe_expressions": 1,
+    "total_unsafe": 7
+  },
+  "packages": [
+    {
+      "name": "ffi",
+      "version": "0.1.0",
+      "package_id": "ffi 0.1.0 (path+file://...)",
+      "unsafe_functions": 2,
+      "unsafe_impls": 1,
+      "unsafe_traits": 0,
+      "unsafe_blocks": 3,
+      "unsafe_expressions": 1,
+      "total_unsafe": 7
+    }
+  ]
+}
+```
