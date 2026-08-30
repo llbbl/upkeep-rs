@@ -23,7 +23,35 @@ pub struct DetectOutput {
 
 #[derive(Debug, Serialize)]
 pub struct DepsOutput {
+    /// Every dependency *edge*: one per declaration by one workspace member.
+    ///
+    /// Raw declarations, with no deduplication and no regard for kind. A crate
+    /// listed in both `[dependencies]` and `[dev-dependencies]` counts twice, and
+    /// a crate declared by three workspace members counts three times.
+    ///
+    /// **This is not the unit of [`DepsOutput::outdated`] or
+    /// [`DepsOutput::checked`]**, and it is not a denominator. See `checked`.
     pub total: usize,
+    /// Dependency units the freshness question was actually settled for.
+    ///
+    /// Counted in *groups*, the same unit as [`DepsOutput::outdated`]: edges
+    /// merged by `(name, resolved version)`, so the crate that counts twice in
+    /// [`DepsOutput::total`] counts once here. `checked <= total` always, and the
+    /// difference is *not* the skip count — it is mostly re-declaration.
+    ///
+    /// Concretely this is every resolved group whose latest version was fetched
+    /// and compared, plus every dependency skipped as *not applicable* rather
+    /// than unmeasured (`NonRegistry`, `TargetSpecific`, `OptionalNotActivated`):
+    /// a git or path dependency has no registry release to be behind, so it is
+    /// neither outdated nor unchecked. Groups the registry could not answer for
+    /// (`RegistryUnavailable`, `RegistryMetadataMissing`) are excluded — those
+    /// are comparisons that were owed and never made.
+    ///
+    /// `outdated <= checked` holds, which is what makes `(checked - outdated) /
+    /// checked` a meaningful freshness ratio. Deriving that denominator as
+    /// `total - skipped` does not hold: it subtracts a group count from an edge
+    /// count and credits comparisons that never happened.
+    pub checked: usize,
     pub outdated: usize,
     pub major: usize,
     pub minor: usize,
@@ -130,19 +158,77 @@ pub struct UnsafeSummary {
     pub total_unsafe: usize,
 }
 
+/// A project health grade over the metrics that could actually be measured.
+///
+/// Metrics whose analyzer did not run are **excluded** rather than assumed
+/// healthy: they carry a `None` score in `breakdown`, are listed in
+/// `unavailable`, and their weight is removed from the denominator. `score` is
+/// therefore always "of what we could measure", and `complete` says whether
+/// that was everything. Consumers that treat a grade as a health gate must
+/// check `complete` — an `A` over 40% of the weight is not an `A`.
 #[derive(Debug, Serialize)]
 pub struct QualityOutput {
-    pub score: f32,
-    pub grade: Grade,
+    /// Weighted mean of the measured metrics, rescaled to 0-100.
+    ///
+    /// `None` when no metric could be measured at all, because there is then no
+    /// honest number to report. Serializes as JSON `null`.
+    pub score: Option<f32>,
+    /// Grade for `score`, and `None` for the same reason.
+    pub grade: Option<Grade>,
+    /// True only when every metric was measured.
+    pub complete: bool,
+    /// Fraction of the total metric weight that was measured, from 0.0 to 1.0.
+    ///
+    /// This is the denominator `score` was divided by, exposed so a caller can
+    /// judge how much the grade is actually standing on.
+    pub measured_weight: f32,
     pub breakdown: Vec<MetricScore>,
+    /// Metrics that did not run, with why. Empty when `complete` is true.
+    pub unavailable: Vec<UnavailableMetric>,
     pub recommendations: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
 pub struct MetricScore {
     pub name: String,
-    pub score: f32,
+    /// `None` when this metric could not be measured. Never substitute a value
+    /// here — a defaulted `100.0` is indistinguishable from a real perfect
+    /// score, which is the bug this type exists to prevent.
+    pub score: Option<f32>,
     pub weight: f32,
+}
+
+/// A metric that could not be measured, and why.
+#[derive(Debug, Serialize)]
+pub struct UnavailableMetric {
+    pub name: String,
+    /// The weight this metric would have carried, had it run.
+    pub weight: f32,
+    pub reason: UnavailableReason,
+    /// Human-readable explanation, including an install hint when the cause is
+    /// a missing tool.
+    pub detail: String,
+}
+
+/// Why a quality metric could not be measured.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UnavailableReason {
+    /// The analyzer's external tool is not installed. Actionable by the user,
+    /// and not a sign of anything wrong with the project.
+    NotInstalled,
+    /// The analyzer ran but failed. Something is genuinely broken.
+    Failed,
+}
+
+impl fmt::Display for UnavailableReason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let label = match self {
+            UnavailableReason::NotInstalled => "not installed",
+            UnavailableReason::Failed => "failed",
+        };
+        write!(f, "{label}")
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -259,7 +345,7 @@ pub enum SkipReason {
     RegistryUnavailable,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "UPPERCASE")]
 pub enum Grade {
     A,
@@ -592,10 +678,85 @@ impl fmt::Display for AuditOutput {
     }
 }
 
+/// Column width for the score cell in the text breakdown, wide enough for the
+/// literal `unmeasured`.
+const QUALITY_SCORE_COLUMN: usize = 10;
+
 impl fmt::Display for QualityOutput {
+    /// Renders the report with any incompleteness stated **before** the score.
+    ///
+    /// The ordering is deliberate: a reader who stops at the first line must
+    /// not walk away with a headline grade that stood on metrics which never
+    /// ran. Recommendations are printed too — they used to exist only in the
+    /// JSON output, so `cargo upkeep quality` silently dropped them.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        writeln!(f, "Score: {:.1}", self.score)?;
-        writeln!(f, "Grade: {}", self.grade)?;
+        if !self.complete {
+            writeln!(
+                f,
+                "Analysis incomplete: {} of {} metrics could not be measured ({:.0}% of weight measured).",
+                self.unavailable.len(),
+                self.breakdown.len(),
+                self.measured_weight * 100.0
+            )?;
+            for metric in &self.unavailable {
+                writeln!(
+                    f,
+                    "- {} (weight {:.2}, {}): {}",
+                    metric.name, metric.weight, metric.reason, metric.detail
+                )?;
+            }
+            writeln!(f)?;
+        }
+
+        match (self.score, self.grade) {
+            // Two decimals, matching the JSON contract and the precision the
+            // scorer rounds to. Printing fewer digits than the scorer keeps
+            // would let a score of 89.96 render as `90.0` beside `Grade: B`.
+            (Some(score), Some(grade)) if self.complete => {
+                writeln!(f, "Score: {score:.2}")?;
+                writeln!(f, "Grade: {grade}")?;
+            }
+            (Some(score), Some(grade)) => {
+                writeln!(f, "Score: {score:.2} (of the metrics measured)")?;
+                writeln!(f, "Grade: {grade} (partial)")?;
+            }
+            _ => {
+                writeln!(f, "Score: unavailable (no metric could be measured)")?;
+                writeln!(f, "Grade: unavailable")?;
+            }
+        }
+
+        if !self.breakdown.is_empty() {
+            let name_width = self
+                .breakdown
+                .iter()
+                .map(|metric| metric.name.len())
+                .max()
+                .unwrap_or(0);
+
+            writeln!(f)?;
+            writeln!(f, "Breakdown:")?;
+            for metric in &self.breakdown {
+                let cell = match metric.score {
+                    Some(score) => format!("{score:.2}"),
+                    None => "unmeasured".to_string(),
+                };
+                writeln!(
+                    f,
+                    "- {:<name_width$}  {:>QUALITY_SCORE_COLUMN$}  weight {:.2}",
+                    metric.name, cell, metric.weight
+                )?;
+            }
+        }
+
+        if !self.recommendations.is_empty() {
+            writeln!(f)?;
+            writeln!(f, "Recommendations:")?;
+            for recommendation in &self.recommendations {
+                writeln!(f, "- {recommendation}")?;
+            }
+        }
+
         Ok(())
     }
 }
@@ -664,12 +825,30 @@ impl fmt::Display for Grade {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // `UnsafeSummary` is aliased: this module defines its own, and `use
+    // super::*` above would otherwise make which one is meant ambiguous.
+    use crate::core::scorers::quality::{
+        score_quality, Availability, ClippySummary, DependencyFreshness, MsrvStatus, QualityInputs,
+        SecuritySummary, UnsafeSummary as ScoredUnsafe,
+    };
     use serde_json::Value;
 
     fn value_at<'a>(value: &'a Value, key: &str) -> &'a Value {
         value
             .get(key)
             .unwrap_or_else(|| panic!("missing key {key}"))
+    }
+
+    /// Every analyzer down, scored the way production scores it.
+    fn all_unavailable() -> QualityInputs {
+        QualityInputs {
+            dependency_freshness: Availability::failed("crates.io unreachable"),
+            security: Availability::failed("advisory database unreachable"),
+            unused: Availability::failed("advisory database unreachable"),
+            unsafe_code: Availability::failed("advisory database unreachable"),
+            clippy: Availability::failed("advisory database unreachable"),
+            msrv: Availability::failed("advisory database unreachable"),
+        }
     }
 
     #[test]
@@ -737,6 +916,7 @@ mod tests {
 
         let deps = DepsOutput {
             total: 2,
+            checked: 2,
             outdated: 1,
             major: 1,
             minor: 0,
@@ -850,13 +1030,16 @@ mod tests {
         };
 
         let quality = QualityOutput {
-            score: 92.5,
-            grade: Grade::A,
+            score: Some(92.5),
+            grade: Some(Grade::A),
+            complete: true,
+            measured_weight: 1.0,
             breakdown: vec![MetricScore {
                 name: "Security".to_string(),
-                score: 90.0,
+                score: Some(90.0),
                 weight: 0.25,
             }],
+            unavailable: Vec::new(),
             recommendations: vec!["Address security advisories.".to_string()],
         };
 
@@ -988,6 +1171,7 @@ mod tests {
     fn display_deps_output_full_sections() {
         let output = DepsOutput {
             total: 2,
+            checked: 2,
             outdated: 1,
             major: 1,
             minor: 0,
@@ -1062,6 +1246,7 @@ mod tests {
     fn display_deps_output_empty_sections() {
         let output = DepsOutput {
             total: 0,
+            checked: 0,
             outdated: 0,
             major: 0,
             minor: 0,
@@ -1194,14 +1379,95 @@ mod tests {
     #[test]
     fn display_quality_output_formats_score() {
         let output = QualityOutput {
-            score: 92.54,
-            grade: Grade::A,
+            score: Some(92.54),
+            grade: Some(Grade::A),
+            complete: true,
+            measured_weight: 1.0,
             breakdown: Vec::new(),
+            unavailable: Vec::new(),
             recommendations: Vec::new(),
         };
         let text = format!("{output}");
-        assert!(text.contains("Score: 92.5"));
+        // Two decimals, the same precision the scorer rounds to and the JSON
+        // reports. `{:.1}` here would print `92.5` for a stored `92.54`.
+        assert!(text.contains("Score: 92.54"));
         assert!(text.contains("Grade: A"));
+        // A complete run says nothing about incompleteness.
+        assert!(!text.contains("Analysis incomplete"));
+        assert!(!text.contains("partial"));
+    }
+
+    /// Scored through `score_quality` rather than hand-built.
+    ///
+    /// A literal `QualityOutput` can express states production never produces —
+    /// a breakdown that is not all six metrics, or a `complete` flag that
+    /// disagrees with `unavailable`, which is *derived* from it. Deriving the
+    /// fixture means the banner counts ("1 of 6") and the renormalized score
+    /// are the real ones, so this test cannot drift from what users see.
+    #[test]
+    fn display_quality_output_reports_incompleteness_before_the_score() {
+        let output = score_quality(QualityInputs {
+            dependency_freshness: Availability::Measured(DependencyFreshness {
+                total: 10,
+                outdated: 2,
+            }),
+            security: Availability::Measured(SecuritySummary {
+                critical: 0,
+                high: 0,
+                moderate: 0,
+                low: 0,
+            }),
+            unused: Availability::not_installed(
+                "cargo-machete is not installed; install with `cargo install cargo-machete`",
+            ),
+            unsafe_code: Availability::Measured(ScoredUnsafe { total_unsafe: 2 }),
+            clippy: Availability::Measured(ClippySummary {
+                warnings: 12,
+                errors: 0,
+            }),
+            msrv: Availability::Measured(MsrvStatus::Valid),
+        });
+        let text = format!("{output}");
+
+        let warning = text
+            .find("Analysis incomplete")
+            .expect("incompleteness warning");
+        let score = text.find("Score:").expect("score line");
+        assert!(
+            warning < score,
+            "incompleteness must be stated before the score:\n{text}"
+        );
+
+        assert!(text.contains("1 of 6 metrics could not be measured (85% of weight measured)"));
+        assert!(text.contains("not installed"));
+        assert!(text.contains("cargo install cargo-machete"));
+
+        // 0.20*80 + 0.25*100 + 0.15*90 + 0.15*76 + 0.10*100 = 75.9, over the
+        // 0.85 of weight that ran: 75.9 / 0.85 = 89.29.
+        assert!(
+            text.contains("Score: 89.29 (of the metrics measured)"),
+            "{text}"
+        );
+        assert!(text.contains("Grade: B (partial)"));
+
+        // The breakdown shows the unmeasured metric as unmeasured, not as a number.
+        assert!(text.contains("unmeasured"));
+
+        // Recommendations are printed at all, which they previously were not.
+        assert!(text.contains("Recommendations:"));
+        assert!(text.contains("- Update outdated dependencies."));
+    }
+
+    #[test]
+    fn display_quality_output_handles_nothing_measured() {
+        let output = score_quality(all_unavailable());
+        let text = format!("{output}");
+
+        assert!(text.contains("6 of 6 metrics could not be measured"));
+        assert!(text.contains("(0% of weight measured)"));
+        assert!(text.contains("Score: unavailable (no metric could be measured)"));
+        assert!(text.contains("Grade: unavailable"));
+        assert!(text.contains("failed"));
     }
 
     #[test]

@@ -74,7 +74,7 @@ async fn run_geiger_json(workspace_root: &Path) -> Result<std::process::Output> 
     }
 
     handle_tool_output(output, &GEIGER_CONFIG, |stderr| {
-        is_missing_subcommand(stderr, "geiger")
+        is_missing_subcommand(stderr, GEIGER_CONFIG.tool_name)
     })
 }
 
@@ -86,7 +86,7 @@ async fn run_geiger_json_alt(workspace_root: &Path) -> Result<std::process::Outp
     )
     .await?;
     handle_tool_output(output, &GEIGER_CONFIG, |stderr| {
-        is_missing_subcommand(stderr, "geiger")
+        is_missing_subcommand(stderr, GEIGER_CONFIG.tool_name)
     })
 }
 

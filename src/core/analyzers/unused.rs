@@ -66,13 +66,13 @@ where
         if is_unknown_flag(&stderr, "--json") {
             let output = run_tool(&MACHETE_ARGS, workspace_root.to_path_buf()).await?;
             return handle_tool_output(output, &MACHETE_CONFIG, |stderr| {
-                is_missing_subcommand(stderr, "machete")
+                is_missing_subcommand(stderr, MACHETE_CONFIG.tool_name)
             });
         }
     }
 
     handle_tool_output(output, &MACHETE_CONFIG, |stderr| {
-        is_missing_subcommand(stderr, "machete")
+        is_missing_subcommand(stderr, MACHETE_CONFIG.tool_name)
     })
 }
 
