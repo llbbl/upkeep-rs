@@ -23,13 +23,13 @@ jobs:
       - name: Format
         run: cargo fmt --check
       - name: Clippy
-        run: cargo clippy -- -D warnings
+        run: cargo clippy --locked -- -D warnings
       - name: Test
         # Network-dependent tests skip themselves when crates.io is unreachable, which
         # would let them pass vacuously here. CI has network, so require them to run.
         env:
           UPKEEP_REQUIRE_NETWORK_TESTS: "1"
-        run: cargo test --all-features
+        run: cargo test --locked --all-features
 
   msrv:
     name: MSRV
