@@ -631,7 +631,19 @@ fn missing_registry_skip(
 }
 
 fn classify_update(current: &Version, latest: &Version) -> UpdateType {
-    if latest.major > current.major {
+    if current.major == 0 && current.minor == 0 {
+        if latest.patch != current.patch {
+            UpdateType::Major
+        } else {
+            UpdateType::Patch
+        }
+    } else if current.major == 0 {
+        if latest.major != 0 || latest.minor != current.minor {
+            UpdateType::Major
+        } else {
+            UpdateType::Patch
+        }
+    } else if latest.major > current.major {
         UpdateType::Major
     } else if latest.minor > current.minor {
         UpdateType::Minor
@@ -815,6 +827,30 @@ mod tests {
             classify_update(&current, &patch),
             UpdateType::Patch
         ));
+    }
+
+    #[test]
+    fn classify_update_treats_zero_major_versions_as_cargo_breaking_changes() {
+        let cases = [
+            ("0.8.0", "0.10.0", UpdateType::Major),
+            ("0.1.0", "0.2.0", UpdateType::Major),
+            ("0.0.1", "0.0.2", UpdateType::Major),
+            ("1.2.0", "2.0.0", UpdateType::Major),
+            ("1.2.0", "1.3.0", UpdateType::Minor),
+            ("1.2.3", "1.2.4", UpdateType::Patch),
+        ];
+
+        for (current, latest, expected) in cases {
+            assert_eq!(
+                classify_update(
+                    &Version::parse(current).unwrap(),
+                    &Version::parse(latest).unwrap()
+                )
+                .to_string(),
+                expected.to_string(),
+                "{current} -> {latest}"
+            );
+        }
     }
 
     #[test]

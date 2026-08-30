@@ -105,6 +105,10 @@ cargo generate-lockfile
 cargo upkeep deps --json
 ```
 
+Update classification follows Cargo's compatibility rule: upgrades that change the
+leftmost non-zero version component are reported as `major`, including `0.x` minor
+bumps and `0.0.x` patch bumps.
+
 ```json
 {
   "total": 10,
