@@ -26,3 +26,21 @@ jobs:
         run: cargo clippy -- -D warnings
       - name: Test
         run: cargo test --all-features
+
+  msrv:
+    name: MSRV
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Read MSRV from Cargo.toml
+        id: msrv
+        run: echo "version=$(grep '^rust-version = ' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')" >> "$GITHUB_OUTPUT"
+      - name: Install Rust ${{ steps.msrv.outputs.version }}
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.msrv.outputs.version }}
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+      - name: Check against declared MSRV
+        run: cargo check --locked --all-targets
