@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.3.5] - 2026-08-31
+
+### Bug Fixes
+
+- **deps:** Key resolution by dependency kind
 ## [0.3.4] - 2026-08-31
 
 ### Bug Fixes
