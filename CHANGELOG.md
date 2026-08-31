@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.3.8] - 2026-08-31
+
+### Bug Fixes
+
+- **quality:** Collapse the duplicated clippy penalty formula
 ## [0.3.7] - 2026-08-31
 
 ### Bug Fixes
