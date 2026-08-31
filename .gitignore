@@ -4,6 +4,7 @@
 .openai
 .gemini
 .agent
+/_/
 
 # LLM symlinks (point to CLAUDE.md)
 AGENTS.md

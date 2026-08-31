@@ -61,8 +61,9 @@ topo_order = false
 sort_commits = "oldest"
 
 [bump]
-# On 0.x cargo already treats a minor bump as breaking, so mapping BREAKING CHANGE
-# to minor is correct rather than a fudge. `just bump-auto` additionally caps the
-# result at minor, so a major bump is never produced automatically.
-features_always_bump_minor = true
+# Before 1.0, ordinary features stay on the current minor line and bump patch.
+# An explicit breaking feature (`feat!:` or `BREAKING CHANGE`) bumps minor because
+# `breaking_always_bump_major = false`; `just next-version` also caps any major
+# result at minor so an automatic release can never jump to 1.0.
+features_always_bump_minor = false
 breaking_always_bump_major = false
