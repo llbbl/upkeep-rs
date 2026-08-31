@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.3.14] - 2026-08-31
+
+### Bug Fixes
+
+- **unsafe:** Report an outdated cargo-geiger instead of bad JSON
 ## [0.3.13] - 2026-08-31
 
 ### Bug Fixes
