@@ -283,6 +283,7 @@ Notes:
 - `complete` tells you whether every metric ran.
 - `measured_weight` tells you how much of the total grade weight is actually represented.
 - When a metric cannot run, `breakdown[].score` is `null` for that metric and the metric also appears under `unavailable`.
+- The MSRV metric recognizes `package.rust-version` and, for virtual workspaces, `workspace.package.rust-version`, including member declarations that inherit it with `rust-version.workspace = true`.
 
 ### How partial results work
 

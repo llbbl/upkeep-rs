@@ -30,7 +30,7 @@ Goal: Generate a health report, explain the grade, and produce a prioritized act
    - Dependencies: run `/upkeep-rs-deps`.
    - Security: run `/upkeep-rs-audit`.
    - Clippy: fix warnings.
-   - MSRV: add `rust-version` to `Cargo.toml`.
+   - MSRV: add `rust-version` under `[package]`, or under `[workspace.package]` for a virtual workspace.
    - Unused deps: remove with `cargo-machete`.
    - Unsafe code: audit and document safety invariants.
 5. Compare with previous runs when available — but only compare `score` between
