@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.3.7] - 2026-08-31
+
+### Bug Fixes
+
+- **analyzers:** Stop misattributing external tool failures
 ## [0.3.6] - 2026-08-31
 
 ### Bug Fixes
