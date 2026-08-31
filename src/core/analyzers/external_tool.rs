@@ -165,15 +165,62 @@ pub fn is_missing_subcommand(stderr: &str, tool_name: &str) -> bool {
     })
 }
 
+/// Patterns clap uses to report an argument it does not recognize.
+///
+/// clap's wording changed at the 4.0 boundary. clap 2 and 3 emit
+/// ``error: Found argument '--output-format' which wasn't expected, or isn't
+/// valid in this context``; clap 4 emits
+/// ``error: unexpected argument '--output-format' found``. Both are matched.
+///
+/// **The tools themselves do not use clap**, so this wording reaches us
+/// second-hand. `cargo-machete` parses with `argh` and says
+/// `Unrecognized argument: --json`, which matches nothing here;
+/// `cargo-geiger` parses with `pico-args`, whose error type has no
+/// unknown-argument variant at all, so it ignores an unrecognized flag in
+/// silence. The realistic source of clap wording is a **nested** `cargo`
+/// invocation — geiger shells out to `cargo metadata`, and cargo is clap 4.
+///
+/// That makes the two fallbacks these patterns drive (`unsafe_code.rs` and
+/// `unused.rs` retrying with an alternate flag spelling) largely inert against
+/// released versions of either tool. Nothing is broken by that today — current
+/// machete accepts `--json` and current geiger accepts `--output-format`, so
+/// the first attempt succeeds. See #55 for teaching this argh's wording.
+///
+/// Every pattern here widens the surface for misreading an unrelated argument
+/// error as "this specific flag is unsupported", so the list stays limited to
+/// wording clap is known to have used.
+const UNKNOWN_FLAG_PATTERNS: [&str; 2] = ["unexpected argument", "found argument"];
+
 /// Checks if stderr indicates an unknown command-line flag.
 ///
-/// This detects patterns like "unexpected argument" or "found argument"
-/// combined with the flag name.
+/// A match requires a single line to carry both one of
+/// [`UNKNOWN_FLAG_PATTERNS`] and the flag name, with the flag name appearing
+/// *after* the pattern — the shape of every clap wording, verified by running
+/// clap 2.34, 3.2, and 4.6 against an unrecognized flag.
+///
+/// Both constraints exist for the reason [`is_missing_subcommand`] has them:
+/// the tools this runs on shell out to cargo themselves, so an argument error
+/// from a nested invocation can land in the same stderr as outer text naming
+/// the flag we asked about. The same-line rule rejects the multi-line form; the
+/// ordering rule rejects the single-line form an error chain flattens into
+/// (`error: --output-format requires metadata: unexpected argument '--x' found`),
+/// where the flag name precedes the pattern. clap's own message can never take
+/// that shape: the parse error is emitted before the tool's own code runs, so
+/// there is nothing to prefix it with.
+///
+/// This drives the retry-with-alternate-flags fallback in the `unsafe_code` and
+/// `unused` analyzers, not [`ErrorCode::MissingTool`], so a false positive here
+/// costs one wasted retry rather than a wrong diagnosis.
 pub fn is_unknown_flag(stderr: &str, flag_name: &str) -> bool {
-    let lower = stderr.to_lowercase();
     let flag_name_lower = flag_name.to_lowercase();
-    (lower.contains("unexpected argument") || lower.contains("found argument"))
-        && lower.contains(&flag_name_lower)
+    stderr.lines().any(|line| {
+        let lower = line.to_lowercase();
+        UNKNOWN_FLAG_PATTERNS.iter().any(|pattern| {
+            lower
+                .find(pattern)
+                .is_some_and(|start| lower[start + pattern.len()..].contains(&flag_name_lower))
+        })
+    })
 }
 
 #[cfg(test)]
@@ -344,6 +391,111 @@ mod tests {
         assert!(!is_unknown_flag("--json is not recognized", "--json"));
         // Empty stderr
         assert!(!is_unknown_flag("", "--json"));
+    }
+
+    /// Pins the error line each clap generation emits for an unrecognized flag.
+    ///
+    /// The error lines were captured by running clap 2.34, 3.2 and 4.6 against
+    /// `--output-format`, not recalled from documentation. clap 4 reworded the
+    /// message and moved the word "found" behind the flag name —
+    /// `unexpected argument '--x' found` — which is why "found argument" alone
+    /// does not cover it, and `unexpected argument` alone does not cover 2 or 3.
+    ///
+    /// This test does not prove the per-line fix; it passed before it. It is
+    /// here because it is the only thing pinning `found argument`'s reason to
+    /// exist, so a later pass that "simplifies" the pattern list to one entry
+    /// cannot do so with a green suite.
+    ///
+    /// The buffers carry each version's error line, not its whole output: clap
+    /// 3.2 adds a hint line clap 2.34 does not, and clap 4 adds a
+    /// `tip: a similar argument exists` line for a near-miss flag. Only the
+    /// error line is read, and on that line 2.34 and 3.2 are byte-identical.
+    #[test]
+    fn is_unknown_flag_pins_clap_error_wording() {
+        // The error line clap 2.34 and clap 3.2 both emit.
+        let clap2_3 = "error: Found argument '--output-format' which wasn't expected, \
+                       or isn't valid in this context\n\n\
+                       USAGE:\n    \
+                       cargo-machete [OPTIONS]\n\n\
+                       For more information try --help\n";
+        assert!(is_unknown_flag(clap2_3, "--output-format"));
+
+        let clap4 = "error: unexpected argument '--output-format' found\n\n\
+                     Usage: cargo-machete [OPTIONS]\n\n\
+                     For more information, try '--help'.\n";
+        assert!(is_unknown_flag(clap4, "--output-format"));
+
+        // A different flag's rejection is not this flag's rejection. The flag
+        // has to appear in the buffer for this to test anything — `--json`
+        // occurs nowhere above, so asserting on it would pass trivially.
+        let other = "error: unexpected argument '--json' found\n\n\
+                     Usage: cargo-machete [OPTIONS]\n";
+        assert!(is_unknown_flag(other, "--json"));
+        assert!(!is_unknown_flag(other, "--output-format"));
+    }
+
+    /// A nested argument error must not be read as the outer flag being unknown.
+    ///
+    /// `cargo-geiger` shells out to `cargo metadata`. When that nested call
+    /// rejects an argument, clap's wording lands in the same stderr buffer as
+    /// outer error text naming the flag we actually asked about — but never on
+    /// the same line. Matching across the whole buffer sent the analyzer down
+    /// the alternate-flag retry path for a failure the retry cannot fix.
+    #[test]
+    fn is_unknown_flag_requires_pattern_and_flag_on_one_line() {
+        let nested = "error: unexpected argument '--bogus-flag' found\n\n\
+                      Usage: cargo metadata [OPTIONS]\n\
+                      error: cargo-geiger --output-format failed\n";
+        assert!(!is_unknown_flag(nested, "--output-format"));
+
+        // The same buffer with the real wording on one line still fires: the
+        // rule is same-line, not first-line.
+        let genuine = "warning: unrelated noise\n\
+                       error: unexpected argument '--output-format' found\n\n\
+                       Usage: cargo-geiger [OPTIONS]\n";
+        assert!(is_unknown_flag(genuine, "--output-format"));
+    }
+
+    /// A help listing that names the flag is not a rejection of the flag.
+    ///
+    /// clap prints the accepted options underneath its error, so a buffer that
+    /// rejects `--bogus-flag` also spells out `--output-format` as a *supported*
+    /// flag a few lines down. Whole-buffer matching read that as "the flag we
+    /// asked about is unknown" and retried with the alternate spelling, which
+    /// fails identically because the real problem was never the flag.
+    ///
+    /// This is also what makes `test_is_unknown_flag_with_multiline_stderr`
+    /// meaningful rather than lucky: there the flag sits on the error line, and
+    /// its USAGE block is inert.
+    #[test]
+    fn is_unknown_flag_ignores_flags_echoed_in_a_usage_block() {
+        let stderr = "error: unexpected argument '--bogus-flag' found\n\n\
+                      Usage: cargo-geiger [OPTIONS]\n\n\
+                      Options:\n      \
+                      --output-format <FMT>  Output format\n";
+        assert!(!is_unknown_flag(stderr, "--output-format"));
+        // The flag that really was rejected still matches.
+        assert!(is_unknown_flag(stderr, "--bogus-flag"));
+    }
+
+    /// The flag name has to follow the pattern, not merely share its line.
+    ///
+    /// An error chain flattened onto one line puts the flag we asked about
+    /// before the nested tool's argument error, which a bare same-line check
+    /// still accepts. clap's own message can never take this shape: the parse
+    /// error is emitted before the tool's own code runs, so no prefix naming
+    /// the flag can precede it.
+    #[test]
+    fn is_unknown_flag_requires_flag_name_after_the_pattern() {
+        assert!(!is_unknown_flag(
+            "error: --output-format requires metadata: unexpected argument '--bogus-flag' found",
+            "--output-format"
+        ));
+        // Same line, correct order — clap's actual wording — still matches.
+        assert!(is_unknown_flag(
+            "error: unexpected argument '--output-format' found",
+            "--output-format"
+        ));
     }
 
     #[test]
