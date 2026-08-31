@@ -30,6 +30,8 @@ jobs:
         env:
           UPKEEP_REQUIRE_NETWORK_TESTS: "1"
         run: cargo test --locked --all-features
+      - name: Test installer
+        run: bash ./tests/install.sh
 
   msrv:
     name: MSRV

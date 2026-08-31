@@ -11,7 +11,7 @@
 cargo install cargo-upkeep
 ```
 
-For `cargo-binstall`, the install script, and source builds, see [docs/installation.md](./docs/installation.md).
+For `cargo-binstall`, the install script, and source builds, see [docs/installation.md](./docs/installation.md). Versioned script installs use the same release tag for the binary and companion skills, and report any partial skill failure explicitly.
 
 ## Why use it
 

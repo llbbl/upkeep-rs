@@ -15,7 +15,7 @@ Usage:
   curl -fsSL https://raw.githubusercontent.com/llbbl/upkeep-rs/main/scripts/install.sh | bash
 
 Environment variables:
-  VERSION      Release tag (default: latest)
+  VERSION      Release tag for the binary and skills (default: latest)
   INSTALL_DIR  Install directory (default: prefers ~/.cargo/bin, then /usr/local/bin, then ~/.local/bin)
   SKILLS_DIR   Claude Code skills directory (default: ~/.claude/skills)
   SKIP_SKILLS  Set to 1 to skip skills installation
@@ -86,6 +86,48 @@ detect_platform() {
   printf '%s-%s\n' "$arch" "$os"
 }
 
+resolve_release_ref() {
+  local requested_version="$1"
+  local latest_url
+  local release_ref
+
+  if [[ "$requested_version" != "latest" ]]; then
+    printf '%s\n' "$requested_version"
+    return
+  fi
+
+  latest_url=$(curl -fsSLI -o /dev/null -w '%{url_effective}' \
+    "https://github.com/${REPO}/releases/latest") || fail "failed to resolve latest release"
+  latest_url="${latest_url%/}"
+
+  if [[ "$latest_url" != "https://github.com/${REPO}/releases/tag/"* ]]; then
+    fail "latest release resolved to an unexpected URL: $latest_url"
+  fi
+
+  release_ref="${latest_url##*/}"
+  if [[ -z "$release_ref" || "$release_ref" == "latest" ]]; then
+    fail "latest release did not resolve to a tag"
+  fi
+
+  printf '%s\n' "$release_ref"
+}
+
+print_skill_group() {
+  local heading="$1"
+  shift
+
+  printf '%s:\n' "$heading"
+  if [[ "$#" -eq 0 ]]; then
+    printf '  (none)\n'
+    return
+  fi
+
+  local skill
+  for skill in "$@"; do
+    printf '  /%s\n' "$skill"
+  done
+}
+
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
   usage
   exit 0
@@ -95,6 +137,11 @@ command -v curl >/dev/null 2>&1 || fail "curl is required"
 command -v tar >/dev/null 2>&1 || fail "tar is required"
 
 platform=$(detect_platform)
+release_ref=$(resolve_release_ref "$VERSION")
+if [[ "$VERSION" == "latest" ]]; then
+  printf 'Resolved latest release to %s.\n' "$release_ref"
+fi
+
 if [[ -n "${INSTALL_DIR:-}" ]]; then
   install_dir="$INSTALL_DIR"
   if [[ ! -d "$install_dir" ]]; then
@@ -109,12 +156,7 @@ else
 fi
 
 archive="${BIN_NAME}-${platform}.tar.gz"
-
-if [[ "$VERSION" == "latest" ]]; then
-  url="https://github.com/${REPO}/releases/latest/download/${archive}"
-else
-  url="https://github.com/${REPO}/releases/download/${VERSION}/${archive}"
-fi
+url="https://github.com/${REPO}/releases/download/${release_ref}/${archive}"
 
 tmp_dir=$(mktemp -d)
 cleanup() {
@@ -123,11 +165,7 @@ cleanup() {
 trap cleanup EXIT
 
 checksum_file="${archive}.sha256"
-if [[ "$VERSION" == "latest" ]]; then
-  checksum_url="https://github.com/${REPO}/releases/latest/download/${checksum_file}"
-else
-  checksum_url="https://github.com/${REPO}/releases/download/${VERSION}/${checksum_file}"
-fi
+checksum_url="https://github.com/${REPO}/releases/download/${release_ref}/${checksum_file}"
 
 printf 'Downloading %s...\n' "$url"
 curl -fsSL "$url" -o "$tmp_dir/$archive" || fail "download failed"
@@ -163,27 +201,52 @@ mv "$tmp_dir/$BIN_NAME" "$install_dir/$BIN_NAME" || fail "failed to install bina
 printf 'Installed to %s/%s\n' "$install_dir" "$BIN_NAME"
 "$install_dir/$BIN_NAME" --version || fail "installed binary failed to run"
 
-# Install Claude Code skills
+# Install Claude Code skills from the same release ref as the binary.
+installed_skills=()
+skipped_skills=()
+failed_skills=()
+
 if [[ "${SKIP_SKILLS:-}" != "1" ]]; then
   printf '\nInstalling Claude Code skills to %s...\n' "$SKILLS_DIR"
 
-  skills_base_url="https://raw.githubusercontent.com/${REPO}/main/skills"
+  skills_base_url="https://raw.githubusercontent.com/${REPO}/${release_ref}/skills"
 
   for skill in "${SKILLS[@]}"; do
     skill_dir="$SKILLS_DIR/$skill"
-    mkdir -p "$skill_dir"
+    skill_download="$tmp_dir/${skill}.SKILL.md"
+
+    if ! mkdir -p "$skill_dir"; then
+      printf '  Warning: failed to create directory for %s\n' "$skill"
+      failed_skills+=("$skill")
+      continue
+    fi
 
     printf '  Installing %s...\n' "$skill"
-    curl -fsSL "$skills_base_url/$skill/SKILL.md" -o "$skill_dir/SKILL.md" || {
-      printf '  Warning: failed to download %s, skipping\n' "$skill"
+    if ! curl -fsSL "$skills_base_url/$skill/SKILL.md" -o "$skill_download"; then
+      printf '  Warning: failed to download %s\n' "$skill"
+      failed_skills+=("$skill")
       continue
-    }
-  done
+    fi
 
-  printf 'Skills installed:\n'
-  for skill in "${SKILLS[@]}"; do
-    printf '  /%s\n' "$skill"
+    if ! mv "$skill_download" "$skill_dir/SKILL.md"; then
+      printf '  Warning: failed to install %s\n' "$skill"
+      failed_skills+=("$skill")
+      continue
+    fi
+
+    installed_skills+=("$skill")
   done
+else
+  skipped_skills=("${SKILLS[@]}")
+fi
+
+printf '\n'
+print_skill_group "Skills installed" "${installed_skills[@]}"
+print_skill_group "Skills skipped" "${skipped_skills[@]}"
+print_skill_group "Skills failed" "${failed_skills[@]}"
+
+if [[ "${#failed_skills[@]}" -gt 0 ]]; then
+  fail "${#failed_skills[@]} skill installation(s) failed; the binary remains installed"
 fi
 
 printf '\nDone. Ensure %s is on your PATH.\n' "$install_dir"
