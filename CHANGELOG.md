@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.3.6] - 2026-08-31
+
+### Bug Fixes
+
+- **quality:** Honor virtual workspace MSRV
 ## [0.3.5] - 2026-08-31
 
 ### Bug Fixes
