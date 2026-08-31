@@ -42,6 +42,30 @@ Crates.io lookups are serialized and delayed to roughly one request per second. 
 
 `audit` checks RustSec advisories against the resolved lockfile. In practice that means resolved crates.io packages: path, git, vendored, and alternate-registry dependencies are not reported as advisory matches. The same effective RustSec scope applies to `deps --security` and to the security component inside `quality`.
 
+### Advisory database source
+
+By default the advisory database is cloned or fetched into the shared
+`~/.cargo/advisory-db`. That directory is mutable state shared with every other
+tool on the machine, and it fails in two distinct ways.
+
+Concurrent `cargo-upkeep` runs do not corrupt it: rustsec takes an outer file
+lock on `~/.cargo/advisory-db..lock` and waits on it for up to five minutes, so
+simultaneous audits serialize. The cost is a stall long enough to resemble a
+hung job, not a failure.
+
+A stale `.git/index.lock` — left behind by a killed process, or held by a
+non-rustsec git client — is the hard failure. That lock is taken underneath the
+outer one, and `gix` makes a single attempt with no retry or backoff, so the
+audit errors immediately.
+
+Setting `UPKEEP_ADVISORY_DB` to a local advisory-database checkout reads that
+path instead and fetches nothing. The layout is the advisory-db repository's own
+(`crates/<package>/<RUSTSEC-ID>.md`), and the caller owns keeping it current —
+`cargo-upkeep` will not update it. This is what an offline or air-gapped run
+needs, and what the integration tests use to stay off the shared cache.
+
+A set-but-empty value is an error rather than a fallback to fetching.
+
 ### Optional tooling
 
 Two commands depend on external cargo subcommands:
@@ -72,6 +96,7 @@ If nothing can be measured, `score` and `grade` are `null`. If only some metrics
 
 - The canonical JSON examples in [commands.md](./commands.md) are checked in Rust tests against serialized representative output values.
 - Network-dependent dependency tests skip when crates.io is unavailable unless the environment explicitly requires them.
+- The CLI tests point `UPKEEP_ADVISORY_DB` at a committed fixture database, so they never fetch or lock `~/.cargo/advisory-db`. The fixture carries a fabricated advisory that no real database contains, which is what makes a silent fallback to the shared cache a test failure rather than a quiet pass.
 - Full behavior coverage for `unused` and `unsafe-code` requires the matching optional cargo subcommands to be installed.
 
 ## Source of truth

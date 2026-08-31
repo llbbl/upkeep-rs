@@ -4,10 +4,31 @@ use rustsec::database::Database;
 use rustsec::report::{Report, Settings};
 use rustsec::Lockfile;
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::ffi::OsString;
 use std::path::PathBuf;
 
 use crate::core::error::{ErrorCode, Result, UpkeepError};
 use crate::core::output::{AuditOutput, AuditSummary, Severity, Vulnerability};
+
+/// Names a local RustSec advisory-database checkout to read instead of fetching.
+///
+/// Unset — the default — clones or fetches into the shared `~/.cargo/advisory-db`.
+/// That directory is process-global mutable state, and it fails in two ways.
+///
+/// Two rustsec-based runs do not corrupt each other: `Database::fetch` takes an
+/// outer flock on `~/.cargo/advisory-db..lock` and *waits* on it for up to five
+/// minutes. The cost there is a stall, not an error — long enough to look like a
+/// hung CI job.
+///
+/// The hard failure comes from the git lock underneath, taken only once the outer
+/// flock is already held: a stale `.git/index.lock` left by a killed process, or a
+/// non-rustsec git client touching the repo, fails the audit immediately, because
+/// `gix` makes a single attempt with no retry or backoff.
+///
+/// Set, the database is read from that path and nothing is fetched. The
+/// integration tests use it to stay off the shared cache entirely; an offline or
+/// air-gapped run can point it at a checkout it manages itself.
+pub const ADVISORY_DB_ENV: &str = "UPKEEP_ADVISORY_DB";
 
 pub fn run_audit() -> Result<AuditOutput> {
     let metadata = MetadataCommand::new().exec().map_err(|err| {
@@ -24,13 +45,7 @@ pub fn run_audit() -> Result<AuditOutput> {
         )
     })?;
 
-    let db = Database::fetch().map_err(|err| {
-        UpkeepError::context(
-            ErrorCode::Rustsec,
-            "failed to fetch RustSec advisory database",
-            err,
-        )
-    })?;
+    let db = load_database()?;
     let settings = Settings::default();
     let report = Report::generate(&db, &lockfile, &settings);
 
@@ -71,6 +86,46 @@ pub fn run_audit() -> Result<AuditOutput> {
         vulnerabilities,
         summary,
     })
+}
+
+/// Load the advisory database, honouring [`ADVISORY_DB_ENV`].
+fn load_database() -> Result<Database> {
+    match local_advisory_db(std::env::var_os(ADVISORY_DB_ENV))? {
+        Some(path) => Database::open(&path).map_err(|err| {
+            UpkeepError::context(
+                ErrorCode::Rustsec,
+                format!(
+                    "failed to open RustSec advisory database at {} (from {ADVISORY_DB_ENV})",
+                    path.display()
+                ),
+                err,
+            )
+        }),
+        None => Database::fetch().map_err(|err| {
+            UpkeepError::context(
+                ErrorCode::Rustsec,
+                "failed to fetch RustSec advisory database",
+                err,
+            )
+        }),
+    }
+}
+
+/// Interpret the raw value of [`ADVISORY_DB_ENV`]: `None` means fetch.
+///
+/// A set-but-empty value is an error rather than a fetch. Callers set this
+/// variable specifically to avoid the shared cache, so falling back to fetching
+/// would produce the one outcome they cannot detect — a run that silently used
+/// `~/.cargo/advisory-db` after being told not to.
+fn local_advisory_db(value: Option<OsString>) -> Result<Option<PathBuf>> {
+    match value {
+        None => Ok(None),
+        Some(path) if path.is_empty() => Err(UpkeepError::message(
+            ErrorCode::Config,
+            format!("{ADVISORY_DB_ENV} is set but empty; unset it to fetch the shared database"),
+        )),
+        Some(path) => Ok(Some(PathBuf::from(path))),
+    }
 }
 
 fn map_severity(severity: Option<RustsecSeverity>) -> Severity {
@@ -246,6 +301,29 @@ mod tests {
             path: vec!["pkg".to_string()],
             fix_available: false,
         }
+    }
+
+    #[test]
+    fn local_advisory_db_unset_means_fetch() {
+        assert_eq!(local_advisory_db(None).expect("unset is valid"), None);
+    }
+
+    #[test]
+    fn local_advisory_db_uses_the_given_path() {
+        let path = local_advisory_db(Some(OsString::from("/tmp/advisory-db")))
+            .expect("a path is valid")
+            .expect("a path means local");
+        assert_eq!(path, PathBuf::from("/tmp/advisory-db"));
+    }
+
+    /// An empty value must not degrade into a fetch — see [`local_advisory_db`].
+    #[test]
+    fn local_advisory_db_rejects_an_empty_value() {
+        let err = local_advisory_db(Some(OsString::new())).expect_err("empty is an error");
+        assert!(
+            err.to_string().contains(ADVISORY_DB_ENV),
+            "error should name the variable; got: {err}"
+        );
     }
 
     #[test]
