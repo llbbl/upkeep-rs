@@ -1,4 +1,6 @@
-use cargo_metadata::MetadataCommand;
+use cargo_metadata::{Metadata, MetadataCommand};
+use serde::Deserialize;
+use std::fs;
 
 use crate::cli::commands::deps;
 use crate::core::analyzers::{
@@ -205,22 +207,84 @@ fn build_quality_output(
 }
 
 async fn check_msrv() -> Result<MsrvStatus> {
-    let metadata = run_blocking("cargo metadata", || {
-        MetadataCommand::new().exec().map_err(|err| {
+    run_blocking("MSRV check", || {
+        let metadata = MetadataCommand::new().exec().map_err(|err| {
             UpkeepError::context(ErrorCode::Metadata, "failed to load cargo metadata", err)
-        })
+        })?;
+        msrv_status(&metadata)
     })
-    .await?;
+    .await
+}
 
-    // For virtual workspaces (no root package), return Missing for graceful degradation
-    let Some(root) = metadata.root_package() else {
-        return Ok(MsrvStatus::Missing);
-    };
+#[derive(Debug, Deserialize)]
+struct WorkspaceManifest {
+    workspace: Option<WorkspaceTable>,
+}
 
-    match root.rust_version.as_ref() {
-        Some(_) => Ok(MsrvStatus::Valid),
-        None => Ok(MsrvStatus::Missing),
+#[derive(Debug, Deserialize)]
+struct WorkspaceTable {
+    package: Option<WorkspacePackage>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WorkspacePackage {
+    #[serde(rename = "rust-version")]
+    rust_version: Option<String>,
+}
+
+fn msrv_status(metadata: &Metadata) -> Result<MsrvStatus> {
+    if let Some(root) = metadata.root_package() {
+        return Ok(if root.rust_version.is_some() {
+            MsrvStatus::Valid
+        } else {
+            MsrvStatus::Missing
+        });
     }
+
+    // Cargo resolves `rust-version.workspace = true` onto each member package in
+    // metadata. When every member exposes a version, the virtual workspace has a
+    // complete member-level MSRV declaration and needs no manifest fallback. Requiring
+    // every member avoids treating a partially declared workspace as healthy.
+    let workspace_packages = metadata.workspace_packages();
+    if !workspace_packages.is_empty()
+        && workspace_packages
+            .iter()
+            .all(|package| package.rust_version.is_some())
+    {
+        return Ok(MsrvStatus::Valid);
+    }
+
+    // `[workspace.package]` values are not emitted in cargo metadata unless a member
+    // inherits them. Read the virtual workspace manifest itself so a declared
+    // workspace-wide MSRV still counts even before members opt into inheritance.
+    let manifest_path = metadata.workspace_root.join("Cargo.toml");
+    let contents = fs::read_to_string(&manifest_path).map_err(|err| {
+        UpkeepError::context(
+            ErrorCode::Metadata,
+            format!("failed to read workspace manifest {manifest_path}"),
+            err,
+        )
+    })?;
+    let manifest: WorkspaceManifest = toml::from_str(&contents).map_err(|err| {
+        UpkeepError::context(
+            ErrorCode::Metadata,
+            format!("failed to parse workspace manifest {manifest_path}"),
+            err,
+        )
+    })?;
+
+    Ok(
+        if manifest
+            .workspace
+            .and_then(|workspace| workspace.package)
+            .and_then(|package| package.rust_version)
+            .is_some()
+        {
+            MsrvStatus::Valid
+        } else {
+            MsrvStatus::Missing
+        },
+    )
 }
 
 async fn run_blocking<T, F>(label: &str, func: F) -> Result<T>
@@ -235,7 +299,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{build_quality_output, check_msrv, run_blocking, MsrvStatus};
+    use super::{build_quality_output, check_msrv, msrv_status, run_blocking, MsrvStatus};
     use crate::core::error::{ErrorCode, UpkeepError};
     use crate::core::output::{
         AuditOutput, AuditSummary, ClippyOutput, DependencyType, DepsOutput, Grade, MetricScore,
@@ -247,7 +311,10 @@ mod tests {
         METRIC_CLIPPY, METRIC_DEPENDENCY_FRESHNESS, METRIC_MSRV, METRIC_SECURITY,
         METRIC_UNSAFE_CODE, METRIC_UNUSED_DEPS, WEIGHT_UNUSED_DEPS,
     };
+    use cargo_metadata::{Metadata, MetadataCommand};
     use serde_json::Value;
+    use std::fs;
+    use tempfile::TempDir;
 
     const FLOAT_TOLERANCE: f32 = 0.01;
 
@@ -410,6 +477,45 @@ mod tests {
             .unwrap_or_else(|| panic!("expected {name} to be unavailable"))
     }
 
+    fn virtual_workspace_metadata(
+        workspace_rust_version: Option<&str>,
+        inherit_rust_version: bool,
+    ) -> (TempDir, Metadata) {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let root = temp_dir.path();
+        let member_dir = root.join("member");
+        fs::create_dir_all(member_dir.join("src")).expect("create member src");
+
+        let workspace_package = workspace_rust_version
+            .map(|version| format!("\n[workspace.package]\nrust-version = \"{version}\"\n"))
+            .unwrap_or_default();
+        fs::write(
+            root.join("Cargo.toml"),
+            format!("[workspace]\nresolver = \"2\"\nmembers = [\"member\"]\n{workspace_package}"),
+        )
+        .expect("write workspace manifest");
+
+        let inherited = if inherit_rust_version {
+            "rust-version.workspace = true\n"
+        } else {
+            ""
+        };
+        fs::write(
+            member_dir.join("Cargo.toml"),
+            format!(
+                "[package]\nname = \"member\"\nversion = \"0.1.0\"\nedition = \"2021\"\n{inherited}"
+            ),
+        )
+        .expect("write member manifest");
+        fs::write(member_dir.join("src/lib.rs"), "pub fn stub() {}\n")
+            .expect("write member source");
+
+        let mut command = MetadataCommand::new();
+        command.manifest_path(root.join("Cargo.toml"));
+        let metadata = command.exec().expect("load fixture metadata");
+        (temp_dir, metadata)
+    }
+
     #[tokio::test]
     async fn run_blocking_returns_ok_value() {
         let value = run_blocking("ok", || Ok(42)).await.unwrap();
@@ -433,6 +539,47 @@ mod tests {
         assert!(matches!(
             status,
             crate::core::scorers::quality::MsrvStatus::Valid
+        ));
+    }
+
+    #[test]
+    fn virtual_workspace_level_msrv_is_valid_without_member_inheritance() {
+        let (_temp_dir, metadata) = virtual_workspace_metadata(Some("1.70"), false);
+        assert!(metadata.root_package().is_none());
+        assert!(metadata
+            .workspace_packages()
+            .iter()
+            .all(|package| package.rust_version.is_none()));
+
+        assert!(matches!(
+            msrv_status(&metadata).expect("MSRV status"),
+            MsrvStatus::Valid
+        ));
+    }
+
+    #[test]
+    fn virtual_workspace_inherited_msrv_is_valid() {
+        let (_temp_dir, metadata) = virtual_workspace_metadata(Some("1.70"), true);
+        assert!(metadata.root_package().is_none());
+        assert!(metadata
+            .workspace_packages()
+            .iter()
+            .all(|package| package.rust_version.is_some()));
+
+        assert!(matches!(
+            msrv_status(&metadata).expect("MSRV status"),
+            MsrvStatus::Valid
+        ));
+    }
+
+    #[test]
+    fn virtual_workspace_without_msrv_is_missing() {
+        let (_temp_dir, metadata) = virtual_workspace_metadata(None, false);
+        assert!(metadata.root_package().is_none());
+
+        assert!(matches!(
+            msrv_status(&metadata).expect("MSRV status"),
+            MsrvStatus::Missing
         ));
     }
 
