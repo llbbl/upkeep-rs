@@ -4,7 +4,7 @@ use std::path::Path;
 use std::path::PathBuf;
 
 use crate::core::analyzers::external_tool::{
-    handle_tool_output, is_missing_subcommand, is_unknown_flag, run_cargo_tool, ExternalToolConfig,
+    handle_tool_output, is_missing_subcommand, run_cargo_tool, ExternalToolConfig,
 };
 use crate::core::analyzers::util::describe_json_schema;
 use crate::core::error::{ErrorCode, Result, UpkeepError};
@@ -14,6 +14,14 @@ const GEIGER_CONFIG: ExternalToolConfig<'static> = ExternalToolConfig {
     tool_name: "geiger",
     install_hint: "cargo install cargo-geiger",
 };
+
+/// The `--output-format` value geiger accepts for JSON.
+///
+/// Named rather than inlined so the capitalization is deliberate and testable:
+/// geiger's `OutputFormat` parses case-sensitively and its `main` `unwrap`s the
+/// parse, so a lowercase `json` panics the tool rather than erroring cleanly.
+/// See [`run_geiger_json`].
+const GEIGER_JSON_FORMAT: &str = "Json";
 
 pub async fn run_unsafe() -> Result<UnsafeOutput> {
     let metadata = MetadataCommand::new().exec().map_err(|err| {
@@ -57,34 +65,48 @@ pub async fn run_unsafe() -> Result<UnsafeOutput> {
     }
 }
 
+/// Runs `cargo geiger --output-format Json`.
+///
+/// **The capital `J` is required.** `OutputFormat` derives a bare
+/// `EnumString` — no `ascii_case_insensitive`, no `serialize_all`, verified in
+/// 0.11.0 through 0.13.0 — so `FromStr` matches the variant name exactly, and
+/// geiger's `main` `unwrap`s that parse. Passing `json` made every geiger from
+/// 0.11.0 on panic with `Utf8ArgumentParsingFailed`, which surfaced as
+/// `cargo geiger failed: thread 'main' panicked at ...`. Geiger's own help text
+/// spells the accepted set `Ascii, GitHubMarkdown, Json, Utf8, Ratio`.
+///
+/// There is deliberately no retry with an alternate flag spelling here, unlike
+/// the `unused` analyzer. This used to fall back to `--format json` when
+/// `is_unknown_flag` matched geiger's stderr; that fallback was removed as dead
+/// *and* wrong, on both counts:
+///
+/// - **Unreachable, for two different reasons either side of 0.11.0.** Against
+///   a geiger too old for `--output-format`, `pico-args` drops the unknown flag
+///   silently — its `Error` enum has no unknown-argument variant and geiger
+///   never calls `Arguments::finish()` (checked 0.9.1 through 0.13.0) — so the
+///   run exits 0 and the `!output.status.success()` guard stays shut. From
+///   0.11.0 the guard *does* open, because of the case bug above, but the
+///   stderr it opens on is a Rust panic message, which matches none of
+///   `UNKNOWN_FLAG_PATTERNS`. Either way the retry never fired.
+/// - **Wrong even if reached.** `--format` is not an alternate spelling of
+///   `--output-format`. In every released geiger from 0.9.1 through 0.13.0 it
+///   is the *format string* used to print dependency names, so `--format json`
+///   would have set that pattern to the literal `json` and still printed an
+///   ASCII table. JSON output arrived with `--output-format` in 0.11.0; before
+///   that geiger could not emit JSON at all.
+///
+/// A pre-0.11.0 geiger still cannot be handled: the scan succeeds with table
+/// output and `parse_geiger_output` reports "cargo geiger output was not valid
+/// JSON". No retry can fix that, because there is no flag to retry with —
+/// it needs a version probe or a targeted message. Tracked separately.
 async fn run_geiger_json(workspace_root: &Path) -> Result<std::process::Output> {
     let output = run_cargo_tool(
-        &["geiger", "--output-format", "json"],
+        &["geiger", "--output-format", GEIGER_JSON_FORMAT],
         workspace_root,
         &GEIGER_CONFIG,
     )
     .await?;
 
-    // If the output flag is not recognized, try the alternative flag
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        if is_unknown_flag(&stderr, "--output-format") {
-            return run_geiger_json_alt(workspace_root).await;
-        }
-    }
-
-    handle_tool_output(output, &GEIGER_CONFIG, |stderr| {
-        is_missing_subcommand(stderr, GEIGER_CONFIG.tool_name)
-    })
-}
-
-async fn run_geiger_json_alt(workspace_root: &Path) -> Result<std::process::Output> {
-    let output = run_cargo_tool(
-        &["geiger", "--format", "json"],
-        workspace_root,
-        &GEIGER_CONFIG,
-    )
-    .await?;
     handle_tool_output(output, &GEIGER_CONFIG, |stderr| {
         is_missing_subcommand(stderr, GEIGER_CONFIG.tool_name)
     })
@@ -302,6 +324,22 @@ fn summarize(packages: &[UnsafePackage]) -> UnsafeSummary {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// geiger's `--output-format` value is case-sensitive and must stay `Json`.
+    ///
+    /// `OutputFormat` derives a bare `EnumString`, so `FromStr` matches the
+    /// variant name exactly, and geiger's `main` does
+    /// `Args::parse_args(..).unwrap()`. A lowercase `json` therefore does not
+    /// produce a clean error — it panics the tool, and the panic text reaches
+    /// the user as `cargo geiger failed: thread 'main' panicked at ...`. That
+    /// is what `cargo upkeep unsafe` did against every geiger from 0.11.0 on.
+    ///
+    /// Pinned as a literal rather than compared to the constant, so "fixing"
+    /// the constant to lowercase reddens this instead of passing.
+    #[test]
+    fn geiger_json_format_value_is_capitalized() {
+        assert_eq!(GEIGER_JSON_FORMAT, "Json");
+    }
 
     #[test]
     fn parse_geiger_output_supports_packages_schema() {
