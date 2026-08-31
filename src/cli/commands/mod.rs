@@ -46,16 +46,21 @@ mod tests {
     use super::handle;
     use crate::cli::UpkeepCommand;
 
+    /// Dispatch reaches each handler, for the handlers that can run offline.
+    ///
+    /// Excluded, and why:
+    /// - `Audit` fetches the RustSec advisory database.
+    /// - `Quality` runs the audit and the crates.io lookups, so it does both.
+    ///   It used to be listed here despite that, which meant this test wrote to
+    ///   the shared `~/.cargo/advisory-db` on every `cargo test`. It is covered
+    ///   end-to-end by `cli_quality_command_runs`, which goes through this same
+    ///   dispatch with the advisory database pinned to a local fixture.
+    /// - `Deps` fetches crate info from crates.io.
+    /// - `Unused` and `UnsafeCode` need cargo-machete and cargo-geiger installed.
     #[tokio::test]
     async fn handlers_return_ok() {
-        // Only test commands that don't require network access.
-        // Audit requires fetching rustsec advisory database.
-        // Deps requires fetching crate info from crates.io.
-        // Unused requires cargo-machete to be installed.
-        // Unsafe code requires cargo-geiger to be installed.
         let commands = [
             UpkeepCommand::Detect,
-            UpkeepCommand::Quality,
             UpkeepCommand::Tree(crate::cli::TreeArgs {
                 depth: Some(0),
                 duplicates: false,
