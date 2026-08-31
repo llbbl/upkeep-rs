@@ -112,7 +112,9 @@ fn unavailable_from<T>(err: &UpkeepError) -> Availability<T> {
 /// version for a git or path dependency to be behind, so dropping them would
 /// misreport the denominator in the other direction. Unsupported registries and
 /// successful responses without version metadata remain unanswered comparisons,
-/// as does a declared dependency missing from Cargo's resolve graph.
+/// as does a declared dependency missing from Cargo's resolve graph — or present
+/// in it under a package name that resolved to several distinct versions, which
+/// `deps` refuses to guess between.
 fn dependency_freshness(result: Result<DepsOutput>) -> Availability<DependencyFreshness> {
     let output = match result {
         Ok(output) => output,
@@ -131,10 +133,16 @@ fn dependency_freshness(result: Result<DepsOutput>) -> Availability<DependencyFr
         .skipped_packages
         .iter()
         .any(|skipped| skipped.reason == SkipReason::RegistryMetadataMissing);
-    let missing_resolve = output
-        .skipped_packages
-        .iter()
-        .any(|skipped| skipped.reason == SkipReason::MissingResolve);
+    // An ambiguous resolve is an unanswered comparison for the same reason a missing
+    // one is: the declaration was there and no version could be compared. Leaving it
+    // out here would let a run whose only dependency was ambiguous report a measured
+    // freshness of 100 over an empty denominator.
+    let unanswered_resolve = output.skipped_packages.iter().any(|skipped| {
+        matches!(
+            skipped.reason,
+            SkipReason::MissingResolve | SkipReason::AmbiguousResolve
+        )
+    });
 
     // `checked == 0` with nothing skipped is a project with no dependencies,
     // which genuinely scores 100. An unanswered registry comparison makes it
@@ -144,18 +152,18 @@ fn dependency_freshness(result: Result<DepsOutput>) -> Availability<DependencyFr
         && (registry_unavailable
             || unsupported_registry
             || registry_metadata_missing
-            || missing_resolve)
+            || unanswered_resolve)
     {
         let detail = if registry_unavailable
             && !unsupported_registry
             && !registry_metadata_missing
-            && !missing_resolve
+            && !unanswered_resolve
         {
             "the crates.io registry was unavailable"
         } else if unsupported_registry
             && !registry_unavailable
             && !registry_metadata_missing
-            && !missing_resolve
+            && !unanswered_resolve
         {
             "no supported registry comparison was available"
         } else {
@@ -850,6 +858,39 @@ mod tests {
             alias: None,
             required: "1.0".to_string(),
             reason: SkipReason::MissingResolve,
+            dependency_type: DependencyType::Normal,
+            source: None,
+            target: None,
+        });
+        deps.skipped = 1;
+
+        let output = build_quality_output(
+            Ok(deps),
+            Ok(clean_audit()),
+            Ok(clean_clippy()),
+            Ok(MsrvStatus::Valid),
+            Ok(clean_unused()),
+            Ok(clean_unsafe()),
+        );
+
+        assert_eq!(score_of(&output, METRIC_DEPENDENCY_FRESHNESS), None);
+        assert!(!output.complete);
+    }
+
+    /// An ambiguous resolve is as unanswered as a missing one.
+    ///
+    /// The crate exists on crates.io and a comparison was owed; `deps` declined to
+    /// guess which resolved instance the declaration meant. Treating that as
+    /// anything other than unmeasured would score a run where nothing was compared
+    /// as a measured 100 over an empty denominator.
+    #[test]
+    fn build_quality_output_all_ambiguous_resolve_is_unavailable() {
+        let mut deps = deps_output(1, 0, 0, 0);
+        deps.skipped_packages.push(SkippedDependency {
+            name: "wasm-bindgen".to_string(),
+            alias: None,
+            required: "=0.2.100".to_string(),
+            reason: SkipReason::AmbiguousResolve,
             dependency_type: DependencyType::Normal,
             source: None,
             target: None,

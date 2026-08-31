@@ -176,6 +176,8 @@ Registry lookups are failure-tolerant. If one crate fails, successful sibling lo
 
 `missing_resolve` is also an unanswered freshness comparison: Cargo metadata contained the declaration but no resolved version to compare. It is excluded from `checked`, and a run containing only unresolved dependencies makes dependency freshness unavailable. Local path dependencies remain `non_registry`; their names are never sent to crates.io.
 
+`ambiguous_resolve` is the same kind of unanswered comparison, for a narrower cause: one member resolved a package name to several distinct versions and the declaration matched none of the resolve-graph keys that would say which instance it meant — typically a crate with a custom `[lib] name` pulled in twice at different versions. Rather than report an arbitrary instance's version against that declaration's own requirement, `deps` skips the dependency. Because the precedence below is deliberate, it can also appear for an inactive optional or foreign-target declaration whose package name is ambiguous for unrelated reasons, with no custom `[lib] name` involved. Like `missing_resolve`, it is excluded from `checked` and can make dependency freshness unavailable; it takes precedence over `optional_not_activated` and `target_specific` so a refused comparison never re-enters the denominator as "not applicable".
+
 That distinction is what `quality` uses for dependency freshness. If the registry could not answer, the denominator shrinks; those dependencies do not become implicitly healthy.
 
 ## audit
