@@ -1,6 +1,6 @@
 ---
 name: upkeep-rs-quality
-version: 0.3.14
+version: 0.3.15
 description: Generate Rust project health grade with improvement recommendations
 allowed-tools: Bash, Read, Grep, Glob, Edit
 ---

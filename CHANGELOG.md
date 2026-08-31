@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.3.15] - 2026-08-31
+
+### Miscellaneous
+
+- **package:** Exclude dev-only files from published crate
 ## [0.3.14] - 2026-08-31
 
 ### Bug Fixes
