@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.3.13] - 2026-08-31
+
+### Bug Fixes
+
+- **analyzers:** Unbreak unused and unsafe against released tools
 ## [0.3.12] - 2026-08-31
 
 ### Bug Fixes
