@@ -16,7 +16,7 @@ use crate::core::scorers::quality::{
     SecuritySummary, UnsafeSummary, UnusedSummary,
 };
 
-pub async fn run(json: bool) -> Result<()> {
+pub async fn run(json: bool, require_complete: bool) -> Result<()> {
     let deps_future = deps::analyze(false);
     let audit_future = run_blocking("audit", run_vulnerability_audit);
     let clippy_future = run_clippy();
@@ -42,7 +42,52 @@ pub async fn run(json: bool) -> Result<()> {
         unsafe_result,
     );
 
-    emit_output(json, &output)
+    // The report is printed before the policy runs, so a failing exit status
+    // never costs the caller the analysis that produced it.
+    emit_output(json, &output)?;
+    enforce_exit_policy(&output, require_complete)
+}
+
+/// Turns an already-printed report into the process exit status.
+///
+/// `run` used to return `Ok(())` in every case, so a CI job that shelled out to
+/// `quality` without parsing JSON got a green build out of an analysis that
+/// measured nothing at all (#34).
+///
+/// A *partial* run still exits zero unless the caller opts in with
+/// `--require-complete`; that default is what existing pipelines are relying on.
+/// A run with no score is different in kind — there is no result for `complete`
+/// to qualify — so it fails either way.
+///
+/// This is deliberately a pure function over the finished output: `run` itself
+/// reaches the network and shells out to external tools, so it is no place to
+/// test a decision this small.
+fn enforce_exit_policy(output: &QualityOutput, require_complete: bool) -> Result<()> {
+    if output.score.is_none() {
+        return Err(UpkeepError::message(
+            ErrorCode::IncompleteAnalysis,
+            format!(
+                "quality analysis measured nothing: all {} metrics were unavailable, so no score \
+                 was produced; the report says why each one could not run",
+                output.breakdown.len()
+            ),
+        ));
+    }
+
+    if require_complete && !output.complete {
+        return Err(UpkeepError::message(
+            ErrorCode::IncompleteAnalysis,
+            format!(
+                "quality analysis incomplete: {} of {} metrics could not be measured ({:.0}% of \
+                 weight measured); --require-complete treats that as a failure",
+                output.unavailable.len(),
+                output.breakdown.len(),
+                output.measured_weight * 100.0
+            ),
+        ));
+    }
+
+    Ok(())
 }
 
 fn emit_output(json: bool, output: &QualityOutput) -> Result<()> {
@@ -307,7 +352,10 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{build_quality_output, check_msrv, msrv_status, run_blocking, MsrvStatus};
+    use super::{
+        build_quality_output, check_msrv, enforce_exit_policy, msrv_status, run_blocking,
+        MsrvStatus,
+    };
     use crate::core::analyzers::clippy::parse_diagnostics;
     use crate::core::error::{ErrorCode, UpkeepError};
     use crate::core::output::{
@@ -1602,5 +1650,110 @@ mod tests {
             .expect("breakdown")
             .iter()
             .all(|metric| metric["score"] == Value::Null));
+    }
+
+    /// Every metric measured.
+    fn complete_run() -> QualityOutput {
+        let output = build_quality_output(
+            Ok(deps_output(0, 0, 0, 0)),
+            Ok(clean_audit()),
+            Ok(clean_clippy()),
+            Ok(MsrvStatus::Valid),
+            Ok(clean_unused()),
+            Ok(clean_unsafe()),
+        );
+        assert!(output.complete && output.score.is_some(), "fixture premise");
+        output
+    }
+
+    /// Some metrics down, but enough measured to produce a score. This is the
+    /// case the exit policy treats differently depending on the flag, so the
+    /// fixture asserts it really is that case and not one of the other two.
+    fn partial_run() -> QualityOutput {
+        let output = build_quality_output(
+            Err(err()),
+            Err(err()),
+            Err(err()),
+            Ok(MsrvStatus::Valid),
+            Err(err()),
+            Err(err()),
+        );
+        assert!(
+            !output.complete && output.score.is_some(),
+            "fixture premise"
+        );
+        output
+    }
+
+    /// Nothing measured at all: `score` is `None`.
+    fn unmeasured_run() -> QualityOutput {
+        let output = build_quality_output(
+            Err(err()),
+            Err(err()),
+            Err(err()),
+            Err(err()),
+            Err(err()),
+            Err(err()),
+        );
+        assert!(output.score.is_none(), "fixture premise");
+        output
+    }
+
+    #[test]
+    fn exit_policy_passes_a_complete_run_either_way() {
+        enforce_exit_policy(&complete_run(), false).expect("complete run exits zero");
+        enforce_exit_policy(&complete_run(), true)
+            .expect("--require-complete is satisfied by a complete run");
+    }
+
+    /// The backward-compatible default: a partial analysis still exits zero.
+    #[test]
+    fn exit_policy_passes_a_partial_run_by_default() {
+        enforce_exit_policy(&partial_run(), false).expect("partial run exits zero by default");
+    }
+
+    #[test]
+    fn exit_policy_fails_a_partial_run_under_require_complete() {
+        let err = enforce_exit_policy(&partial_run(), true).expect_err("--require-complete fails");
+        assert_eq!(err.code(), ErrorCode::IncompleteAnalysis);
+    }
+
+    /// The bug in #34: no score is a total analysis failure, and no caller is
+    /// deliberately relying on that exiting zero. The flag does not gate it.
+    #[test]
+    fn exit_policy_always_fails_a_run_that_measured_nothing() {
+        let err = enforce_exit_policy(&unmeasured_run(), false)
+            .expect_err("no score must exit nonzero without the flag");
+        assert_eq!(err.code(), ErrorCode::IncompleteAnalysis);
+
+        let err = enforce_exit_policy(&unmeasured_run(), true)
+            .expect_err("no score must exit nonzero with the flag");
+        assert_eq!(err.code(), ErrorCode::IncompleteAnalysis);
+    }
+
+    /// A CI user sees only this line on stderr, so it has to say which of the
+    /// two failures fired and how much was actually measured. "quality failed"
+    /// would send them looking for a crash that did not happen.
+    #[test]
+    fn exit_policy_failures_explain_themselves() {
+        let unmeasured = enforce_exit_policy(&unmeasured_run(), false)
+            .expect_err("no score")
+            .to_string();
+        assert!(
+            unmeasured.contains("measured nothing")
+                && unmeasured.contains("all 6 metrics were unavailable")
+                && unmeasured.contains("why each one could not run"),
+            "unhelpful message: {unmeasured}"
+        );
+
+        let partial = enforce_exit_policy(&partial_run(), true)
+            .expect_err("--require-complete")
+            .to_string();
+        assert!(
+            partial.contains("5 of 6 metrics could not be measured")
+                && partial.contains("10% of weight measured")
+                && partial.contains("--require-complete"),
+            "unhelpful message: {partial}"
+        );
     }
 }

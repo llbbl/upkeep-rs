@@ -46,6 +46,10 @@ pub enum ErrorCode {
     TaskFailed,
     Config,
     Concurrency,
+    /// An analysis ran and reported honestly, but measured too little to stand
+    /// behind. Distinct from the codes above: nothing failed to *execute*, so
+    /// the command's normal output is still valid and still printed.
+    IncompleteAnalysis,
     /// Reserved for unexpected internal errors. Currently unused but kept
     /// for future error handling needs.
     #[allow(dead_code)]
@@ -175,6 +179,7 @@ impl fmt::Display for ErrorCode {
             ErrorCode::TaskFailed => "task_failed",
             ErrorCode::Config => "config",
             ErrorCode::Concurrency => "concurrency",
+            ErrorCode::IncompleteAnalysis => "incomplete_analysis",
             ErrorCode::Internal => "internal",
         };
         write!(f, "{label}")

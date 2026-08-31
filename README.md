@@ -18,7 +18,7 @@ For `cargo-binstall`, the install script, and source builds, see [docs/installat
 - One command surface for dependency freshness, RustSec vulnerabilities and informational warnings, yanked resolved crates, unused dependencies, unsafe code, dependency trees, and a graded quality summary.
 - One JSON shape per subcommand, with stdout reserved for machine-readable output and diagnostics kept on stderr.
 - Workspace-aware dependency reporting: `deps` groups by crate name plus resolved version, and tells you which members actually own each result.
-- A single `quality` grade that stays honest about partial runs through `complete`, `measured_weight`, and `unavailable`.
+- A single `quality` grade that stays honest about partial runs through `complete`, `measured_weight`, and `unavailable` — and, for callers that do not parse JSON, through an exit status that fails when the analysis measured nothing.
 
 ## Real examples
 
@@ -60,6 +60,8 @@ cargo upkeep quality --json
 ```
 
 Selected fields from a real run on this repository on August 30, 2026. The full `quality` contract, including `breakdown`, recommendation ordering, and CI guidance, is in [docs/commands.md#quality](./docs/commands.md#quality).
+
+That run is incomplete but scored, so it exits 0. In CI, gate on `complete` if you parse the JSON; if you do not, `cargo upkeep quality --require-complete` turns the same condition into a nonzero exit status — but note it demands every optional tool be installed, so a stock runner fails it. A run where nothing could be measured at all — `score: null` — exits nonzero with or without the flag. See [docs/commands.md#exit-codes](./docs/commands.md#exit-codes).
 
 Security-aware dependency checks use the same interface:
 

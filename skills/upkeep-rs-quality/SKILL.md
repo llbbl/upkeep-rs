@@ -60,6 +60,11 @@ Rules:
   `measured_weight`.
 - **`score` and `grade` are `null` when nothing could be measured.** Report that
   the analysis failed. Do not substitute a number, and do not infer a grade.
+- **A nonzero exit status does not mean there is no report.** `quality` exits
+  nonzero when nothing was measured, and when `--require-complete` is passed and
+  the run was partial. The full JSON report is still on stdout in both cases, and
+  the reason is on stderr. Read stdout before reporting a failure — the exit
+  status is added to the analysis, not substituted for it.
 - **Do not turn an unavailable metric into a finding.** `not_installed` says
   nothing about project health; a missing `cargo-geiger` is not unsafe code.
 - **Route the two reasons differently.** For `not_installed`, surface the

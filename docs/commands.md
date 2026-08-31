@@ -10,6 +10,34 @@ Every command accepts:
 - `--json`
 - `--log-level <level>`
 
+## Exit codes
+
+| Status | Meaning |
+| --- | --- |
+| `0` | The command ran and produced its result. |
+| `1` | The command failed, or `quality` rejected its own result. Stdout is empty except in the `quality` cases below, which print the full report first. The diagnostic goes to stderr either way, as a JSON error object under `--json` and as a plain line otherwise. |
+| `2` | The arguments were rejected. Usage goes to stderr. |
+
+Findings are not failures. `audit` exits 0 with vulnerabilities in its report, `deps` exits 0 with outdated crates, and `unused` exits 0 with unused dependencies. Every command works this way, and `quality` is the only one that adds anything to it.
+
+### `quality`
+
+`quality` also exits nonzero when its own analysis did not measure enough to stand behind:
+
+| Result | Status |
+| --- | --- |
+| `complete: true` | `0` |
+| `complete: false`, a `score` was still produced | `0` — or `1` with `--require-complete` |
+| `score: null`, nothing could be measured at all | `1`, always |
+
+The report is printed first and in full, on stdout and unchanged, so a nonzero status never costs you the output that explains it. The reason is added on stderr, alongside the report rather than in place of it.
+
+A *partial* analysis exiting 0 is the backward-compatible default: it produced a real number over a stated `measured_weight`, and a pipeline that accepts that is making a defensible choice. Pass `--require-complete` to reject it. A *total* failure is different in kind — there is no result for `complete` to qualify — so it exits nonzero either way, flag or no flag.
+
+`--require-complete` means what it says: every metric must have run, including the ones that depend on optional tooling — `cargo-machete`, `cargo-geiger`, the `clippy` component, and a reachable RustSec advisory database. A runner without them fails the flag permanently, reporting missing tools rather than anything about the project. Install what you intend to measure in the job before gating on it, or gate on `measured_weight` instead.
+
+This is the signal for callers that do not parse the JSON. If you do parse it, gate on `complete` and `measured_weight` as before; the fields are unchanged and remain the more precise control.
+
 ## detect
 
 Detect workspace, package, tooling, and CI metadata for the current project.
@@ -246,6 +274,10 @@ Compute a weighted project-health grade across dependency freshness, security, u
 cargo upkeep quality --json
 ```
 
+Flags:
+
+- `--require-complete` — exit nonzero when any metric could not be measured. See [Exit codes](#exit-codes).
+
 <!-- cargo-upkeep-example:quality -->
 ```json
 {
@@ -332,6 +364,8 @@ The dependency freshness metric uses the grouped `checked` subset from `deps`, n
 ### CI guidance
 
 Do not gate CI on `grade` alone. Gate on `complete == true`, or on a `measured_weight` threshold you explicitly accept in your pipeline.
+
+If your job does not parse the JSON, run `cargo upkeep quality --require-complete` and let the exit status carry the same gate. Either way, a run that measured nothing fails on its own — see [Exit codes](#exit-codes).
 
 ## tree
 

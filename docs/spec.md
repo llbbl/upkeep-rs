@@ -97,6 +97,8 @@ The grouped `checked` count also excludes registry failures. If crates.io is una
 
 If nothing can be measured, `score` and `grade` are `null`. If only some metrics run, treat `complete` and `measured_weight` as part of the public contract, not as optional metadata.
 
+The exit status is part of that contract too. `quality` exits nonzero when `score` is `null`, and when `--require-complete` is passed and `complete` is false; every other run exits 0, including a partial one that still produced a score. In both failing cases the report is written to stdout in full before the process fails, so the status is added to the analysis rather than substituted for it. The reason goes to stderr — a JSON error object under `--json`, a plain line otherwise. Exit codes are tabulated in [commands.md](./commands.md#exit-codes).
+
 ## Testing notes
 
 - The canonical JSON examples in [commands.md](./commands.md) are checked in Rust tests against serialized representative output values.

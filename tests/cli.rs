@@ -269,3 +269,81 @@ fn cli_unsafe_command_runs_when_tool_available() {
         .success()
         .stdout(predicate::str::contains("\"summary\""));
 }
+
+/// #34's whole point is that the exit status is *added* to the report, not
+/// substituted for it: a CI author who does not parse JSON needs the status,
+/// and still needs the analysis that explains it. `enforce_exit_policy` is a
+/// pure function so it can be unit-tested, which means the ordering of the
+/// print against the policy is only observable from out here.
+#[test]
+fn cli_quality_exits_nonzero_and_still_prints_the_report_when_nothing_is_measured() {
+    // Deliberately not a cargo project, so every metric is unavailable.
+    let empty = tempfile::tempdir().expect("temp dir");
+    let output = upkeep_cmd()
+        .current_dir(empty.path())
+        .args(["quality", "--json"])
+        .output()
+        .expect("run quality");
+
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "nothing was measured, so this must not report success; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let json: Value = serde_json::from_slice(&output.stdout)
+        .expect("the full report must still be on stdout alongside the failing status");
+    assert_eq!(json["score"], Value::Null, "premise: nothing was measured");
+    assert_eq!(
+        json["breakdown"].as_array().expect("breakdown").len(),
+        6,
+        "the report must be complete, not truncated because the command failed"
+    );
+
+    let err: Value = serde_json::from_slice(&output.stderr).expect("error object on stderr");
+    assert_eq!(err["code"], "incomplete_analysis");
+}
+
+/// `Command` and `UpkeepCommand` are separate clap enums that `main` maps
+/// between by hand, so a flag can parse correctly under one invocation form and
+/// be silently dropped under the other. The parse-level test covers the two
+/// enums; only running the binary covers the mapping between them.
+///
+/// Asserted against the run's own observed `complete` rather than a fixed exit
+/// status, so it holds whether or not `cargo-machete` and `cargo-geiger` happen
+/// to be installed on this machine.
+#[test]
+fn cli_quality_require_complete_is_plumbed_through_both_invocation_forms() {
+    let temp_dir = create_temp_crate("cli-quality-require-complete");
+
+    let baseline = upkeep_cmd()
+        .current_dir(temp_dir.path())
+        .args(["quality", "--json"])
+        .output()
+        .expect("run quality");
+    assert!(
+        baseline.status.success(),
+        "the default path must stay backward compatible; stderr: {}",
+        String::from_utf8_lossy(&baseline.stderr)
+    );
+    let json: Value = serde_json::from_slice(&baseline.stdout).expect("parse quality json");
+    let complete = json["complete"].as_bool().expect("complete");
+
+    for form in [
+        &["quality", "--require-complete", "--json"][..],
+        &["upkeep", "quality", "--require-complete", "--json"][..],
+    ] {
+        let output = upkeep_cmd()
+            .current_dir(temp_dir.path())
+            .args(form)
+            .output()
+            .expect("run quality");
+        assert_eq!(
+            output.status.success(),
+            complete,
+            "invocation form {form:?} ignored --require-complete; stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}

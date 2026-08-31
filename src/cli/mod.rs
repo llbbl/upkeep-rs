@@ -40,7 +40,13 @@ pub enum Command {
         security: bool,
     },
     #[command(about = "Compute project quality score")]
-    Quality,
+    Quality {
+        #[arg(
+            long,
+            help = "Exit nonzero when any metric could not be measured (a run that measured nothing always exits nonzero)"
+        )]
+        require_complete: bool,
+    },
     #[command(about = "Find unused dependencies")]
     Unused,
     #[command(
@@ -67,7 +73,13 @@ pub enum UpkeepCommand {
         security: bool,
     },
     #[command(about = "Compute project quality score")]
-    Quality,
+    Quality {
+        #[arg(
+            long,
+            help = "Exit nonzero when any metric could not be measured (a run that measured nothing always exits nonzero)"
+        )]
+        require_complete: bool,
+    },
     #[command(about = "Find unused dependencies")]
     Unused,
     #[command(
@@ -204,6 +216,38 @@ mod tests {
         assert!(cli.json);
         assert!(cli.verbose);
         assert_eq!(cli.log_level.as_deref(), Some("debug"));
+    }
+
+    /// `Command` and `UpkeepCommand` declare `quality` separately, so a flag
+    /// added to one silently exists only on `cargo-upkeep quality` or only on
+    /// `cargo upkeep quality`. Both forms are asserted here for that reason.
+    #[test]
+    fn parses_quality_require_complete_in_both_forms() {
+        let cli = Cli::try_parse_from(["cargo-upkeep", "quality", "--require-complete"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Quality {
+                require_complete: true
+            }
+        ));
+
+        let cli = Cli::try_parse_from(["cargo-upkeep", "upkeep", "quality", "--require-complete"])
+            .unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Upkeep(UpkeepCommand::Quality {
+                require_complete: true
+            })
+        ));
+
+        // Opt-in: absent unless asked for.
+        let cli = Cli::try_parse_from(["cargo-upkeep", "quality"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Quality {
+                require_complete: false
+            }
+        ));
     }
 
     #[test]
