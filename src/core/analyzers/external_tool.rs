@@ -192,11 +192,11 @@ pub fn is_missing_subcommand(stderr: &str, tool_name: &str) -> bool {
 /// it never calls `Arguments::finish()` (checked 0.9.1 through 0.13.0), so the
 /// leftovers holding an unrecognized flag are dropped in silence and there is
 /// no stderr to match. Against a geiger too old for `--output-format` the run
-/// therefore *succeeds* with default non-JSON output and the user sees
-/// "cargo geiger output was not valid JSON". No pattern fixes that — there is
-/// nothing to match on — and no retry fixes it either, because `--format` is a
-/// different flag rather than an alternate spelling. It needs a version probe
-/// or a targeted message. See `run_geiger_json` in `unsafe_code.rs`.
+/// therefore completes with default non-JSON output. No pattern fixes that —
+/// there is nothing to match on — and no retry fixes it either, because
+/// `--format` is a different flag rather than an alternate spelling. That case
+/// is instead recognized from the *stdout* it produced; see
+/// `looks_like_geiger_table` in `unsafe_code.rs`.
 ///
 /// Every pattern here widens the surface for misreading an unrelated argument
 /// error as "this specific flag is unsupported", so the list stays limited to
