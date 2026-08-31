@@ -48,3 +48,28 @@ body must carry the intended prefix and any breaking-change marker.
 The release workflow caps automatic major bumps. Before 1.0 this means a
 breaking change can advance the minor version but can never automatically
 publish `1.0.0`.
+
+## `main` moves after a merge, not at it
+
+The release workflow pushes its `chore(release)` bump commit to `main` from the
+`Compute version` job, roughly two and a half minutes after a releasable pull
+request merges. A branch cut inside that window starts one commit stale, and
+nothing says so until a later rebase or a confusing `Cargo.toml` version.
+
+Run this before cutting a branch:
+
+```bash
+just sync
+```
+
+It fetches, then waits out an in-flight release's `Compute version` job — and
+only that job, because the remaining ten minutes of a release move no refs —
+before fast-forwarding local `main` and reporting whether it actually moved.
+When no release is in flight it waits for nothing.
+
+It is safe to run from a feature branch with uncommitted changes: it never
+checks out, stashes, or rebases. If the current branch is behind `main` it says
+so and prints the rebase command rather than running it for you.
+
+Running it before opening a pull request from a long-lived branch is worthwhile
+too, since such a branch drifts from `main` for the same reason.
