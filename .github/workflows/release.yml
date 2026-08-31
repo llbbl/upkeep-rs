@@ -56,6 +56,10 @@ jobs:
           components: rustfmt, clippy
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
+        # Restore-only avoids post-job cleanup probing cargo publish staging paths.
+        # See https://github.com/Swatinem/rust-cache/issues/193.
+        with:
+          save-if: "false"
       - name: Format
         run: cargo fmt --check
       - name: Clippy
