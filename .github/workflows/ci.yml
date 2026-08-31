@@ -8,6 +8,23 @@ permissions:
   contents: read
 
 jobs:
+  release-policy:
+    name: Release policy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      # Release semantics are version-sensitive. install-action downloads these
+      # supported tools as checksummed release binaries, separately from Cargo's
+      # dependency cache; pin git-cliff so behavior cannot drift between runs.
+      - name: Install just and pinned git-cliff
+        uses: taiki-e/install-action@v2
+        with:
+          tool: just,git-cliff@2.13.1
+          fallback: none
+      - name: Test release policy
+        run: just test-release-policy
+
   test:
     name: Test
     runs-on: ubuntu-latest

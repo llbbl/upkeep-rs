@@ -19,6 +19,9 @@ exclude = [
     "cliff.toml",
     "justfile",
     "scripts/**",
+    # This source-only integration test includes the excluded cliff.toml at
+    # compile time, so the two must never be packaged independently.
+    "tests/release_policy.rs",
     "tests/fixtures/**",
 ]
 

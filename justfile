@@ -27,6 +27,11 @@ test:
 test-installer:
   bash ./tests/install.sh
 
+# Exercise release bump semantics with the policy-pinned git-cliff 2.13.1.
+# Kept out of `just check` so ordinary Rust development needs no external tool.
+test-release-policy:
+  bash ./scripts/test-release-policy.sh
+
 # Run tests with output
 test-verbose:
   cargo test -- --nocapture
@@ -105,7 +110,8 @@ set-version version:
   done
   echo "Set version: $CURRENT -> $NEW"
 
-# Print the next version from conventional commits, capped at minor (stdout = version only)
+# Print the next version from conventional commits (pre-1.0 feat = patch,
+# explicit breaking change = minor), capped at minor (stdout = version only)
 next-version:
   #!/usr/bin/env bash
   set -euo pipefail
@@ -128,7 +134,7 @@ next-version:
   fi
   echo "$NEXT"
 
-# Bump the version from conventional commits, capped at minor
+# Bump from conventional commits using the same pre-1.0 policy as `next-version`
 bump-auto:
   #!/usr/bin/env bash
   set -euo pipefail

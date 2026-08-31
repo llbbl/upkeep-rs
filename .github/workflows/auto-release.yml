@@ -33,10 +33,16 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Install just and git-cliff
+      # Release semantics are version-sensitive. Pin the validated git-cliff
+      # instead of silently changing bump behavior when a new version is released.
+      - name: Install just and pinned git-cliff
         uses: taiki-e/install-action@v2
         with:
-          tool: just,git-cliff
+          tool: just,git-cliff@2.13.1
+          fallback: none
+
+      - name: Test release policy
+        run: just test-release-policy
 
       - name: Compute next version
         id: compute
@@ -67,8 +73,10 @@ jobs:
             echo "::error::Cargo.toml says ${current} but the last tag is ${last_tag}; refusing to release"
             exit 1
           fi
-          # `next-version` prints only the version on stdout; the major-bump cap
-          # warning goes to stderr, so it shows in the log without polluting this.
+          # `next-version` keeps ordinary pre-1.0 features on the current minor
+          # line, maps explicit breaking changes to minor, and prints only the
+          # version on stdout. A major-bump cap warning goes to stderr, so it shows
+          # in the log without polluting this.
           next=$(just next-version)
           echo "current=$current next=$next"
           # Only ever move forward.
