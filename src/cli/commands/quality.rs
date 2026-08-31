@@ -311,12 +311,13 @@ mod tests {
     use crate::core::analyzers::clippy::parse_diagnostics;
     use crate::core::error::{ErrorCode, UpkeepError};
     use crate::core::output::{
-        AuditOutput, AuditSummary, ClippyOutput, DependencyType, DepsOutput, Grade, MetricScore,
-        OutdatedPackage, QualityOutput, SkipReason, SkippedDependency, UnavailableMetric,
-        UnavailableReason, UnsafeOutput, UnsafeSummary as UnsafeOutputSummary, UnusedOutput,
-        UpdateType,
+        AuditOutput, AuditSummary, ClippyOutput, Confidence, DependencyType, DepsOutput, Grade,
+        MetricScore, OutdatedPackage, QualityOutput, Severity, SkipReason, SkippedDependency,
+        UnavailableMetric, UnavailableReason, UnsafeOutput, UnsafePackage,
+        UnsafeSummary as UnsafeOutputSummary, UnusedDep, UnusedOutput, UpdateType, Vulnerability,
     };
     use crate::core::scorers::quality::{
+        score_quality, Availability, QualityInputs, SecuritySummary, UnsafeSummary, UnusedSummary,
         METRIC_CLIPPY, METRIC_DEPENDENCY_FRESHNESS, METRIC_MSRV, METRIC_SECURITY,
         METRIC_UNSAFE_CODE, METRIC_UNUSED_DEPS, WEIGHT_UNUSED_DEPS,
     };
@@ -453,6 +454,158 @@ mod tests {
         }
     }
 
+    // === Asymmetric fixtures ===
+    //
+    // The `clean_*` fixtures above are all zeros or all empty, which is why a
+    // swapped or misread field in the `build_quality_output` mappings is
+    // invisible to every test that uses them (#51). These are the same shapes
+    // with values chosen so a misread field changes the score. They are
+    // additions, not replacements: changing a `clean_*` fixture would move the
+    // expected score of every test that already depends on it being clean.
+
+    /// The four severity counts `asymmetric_audit` reports, in the field order
+    /// of `SecuritySummary`: `[critical, high, moderate, low]`.
+    ///
+    /// **They must stay pairwise distinct.** Swapping the mapping's fields `i`
+    /// and `j` moves the penalty by `(weight_i - weight_j) * (count_j - count_i)`,
+    /// so distinct counts are necessary — and, while the four severity weights
+    /// stay distinct from each other, sufficient.
+    ///
+    /// Necessary and sufficient for the *penalty*, that is. A moved penalty can
+    /// still land on an equal *score*, because the score clamps at 0 and 100:
+    /// three of the six swaps here exceed a penalty of 100 and all report 0.
+    /// They are still caught, because each is compared against the unclamped
+    /// baseline rather than against each other.
+    ///
+    /// Neither premise is assumed. The weights are private to the scorer, so
+    /// `security_summary_mapping_is_not_swappable` runs every pairwise swap
+    /// through the real scorer and fails if any of them is invisible.
+    const SECURITY_COUNTS: [usize; 4] = [1, 2, 3, 4];
+
+    fn vulnerability(index: usize, severity: Severity) -> Vulnerability {
+        Vulnerability {
+            id: format!("RUSTSEC-2024-{index:04}"),
+            package: format!("vulnerable-{index}"),
+            package_version: "1.0.0".to_string(),
+            severity,
+            title: "example advisory".to_string(),
+            path: vec!["demo".to_string(), format!("vulnerable-{index}")],
+            fix_available: true,
+        }
+    }
+
+    /// An `AuditOutput` carrying `SECURITY_COUNTS`.
+    ///
+    /// Built the way `audit::summarize` builds one — every counted
+    /// vulnerability is in `vulnerabilities` and `total` is that list's length
+    /// — so this is a value `run_audit` could actually return rather than a
+    /// summary invented independently of its evidence.
+    fn asymmetric_audit() -> AuditOutput {
+        let [critical, high, moderate, low] = SECURITY_COUNTS;
+        // `Severity` is neither `Copy` nor `Clone`, so each entry is built from
+        // a constructor rather than cloned from one value per severity.
+        let severities: [(usize, fn() -> Severity); 4] = [
+            (critical, || Severity::Critical),
+            (high, || Severity::High),
+            (moderate, || Severity::Moderate),
+            (low, || Severity::Low),
+        ];
+
+        let mut vulnerabilities = Vec::new();
+        for (count, severity) in severities {
+            for _ in 0..count {
+                let index = vulnerabilities.len();
+                vulnerabilities.push(vulnerability(index, severity()));
+            }
+        }
+
+        AuditOutput {
+            summary: AuditSummary {
+                critical,
+                high,
+                moderate,
+                low,
+                total: vulnerabilities.len(),
+            },
+            vulnerabilities,
+        }
+    }
+
+    /// How many entries `asymmetric_unused` puts in each of its two lists.
+    ///
+    /// Different from each other, and their sum differs from both, so reading
+    /// `possibly_unused` — or summing the two — scores differently from reading
+    /// `unused`. `unused_summary_mapping_reads_the_confirmed_list` checks that
+    /// against the real scorer.
+    const UNUSED_CONFIRMED: usize = 2;
+    const UNUSED_POSSIBLE: usize = 5;
+
+    fn asymmetric_unused() -> UnusedOutput {
+        UnusedOutput {
+            unused: (0..UNUSED_CONFIRMED)
+                .map(|index| UnusedDep {
+                    name: format!("unused-{index}"),
+                    dependency_type: DependencyType::Normal,
+                    confidence: Confidence::High,
+                })
+                .collect(),
+            possibly_unused: (0..UNUSED_POSSIBLE)
+                .map(|index| format!("possibly-unused-{index}"))
+                .collect(),
+        }
+    }
+
+    fn unsafe_package(name: &str, counts: [usize; 5]) -> UnsafePackage {
+        let [unsafe_functions, unsafe_impls, unsafe_traits, unsafe_blocks, unsafe_expressions] =
+            counts;
+        UnsafePackage {
+            name: name.to_string(),
+            version: "1.0.0".to_string(),
+            package_id: None,
+            unsafe_functions,
+            unsafe_impls,
+            unsafe_traits,
+            unsafe_blocks,
+            unsafe_expressions,
+            // `parse_geiger_output` derives the per-package total the same way.
+            total_unsafe: counts.iter().sum(),
+        }
+    }
+
+    /// An `UnsafeOutput` whose seven summary fields all hold different counts.
+    ///
+    /// The summary is accumulated from the packages exactly as
+    /// `unsafe_code::summarize` accumulates it, so the totals stay consistent
+    /// with their evidence. The per-package counts are chosen to make the six
+    /// sibling fields distinct from `total_unsafe`, which is the field the
+    /// mapping is supposed to read.
+    fn asymmetric_unsafe() -> UnsafeOutput {
+        let packages = vec![
+            unsafe_package("alpha", [2, 1, 3, 2, 4]),
+            unsafe_package("beta", [1, 0, 1, 3, 2]),
+        ];
+
+        let mut summary = UnsafeOutputSummary {
+            packages: packages.len(),
+            unsafe_functions: 0,
+            unsafe_impls: 0,
+            unsafe_traits: 0,
+            unsafe_blocks: 0,
+            unsafe_expressions: 0,
+            total_unsafe: 0,
+        };
+        for package in &packages {
+            summary.unsafe_functions += package.unsafe_functions;
+            summary.unsafe_impls += package.unsafe_impls;
+            summary.unsafe_traits += package.unsafe_traits;
+            summary.unsafe_blocks += package.unsafe_blocks;
+            summary.unsafe_expressions += package.unsafe_expressions;
+            summary.total_unsafe += package.total_unsafe;
+        }
+
+        UnsafeOutput { packages, summary }
+    }
+
     /// The error an uninstalled optional cargo tool actually produces, once
     /// `is_missing_subcommand` classifies current cargo's stderr correctly.
     fn missing_tool(tool: &str) -> UpkeepError {
@@ -476,6 +629,79 @@ mod tests {
             .find(|metric| metric.name == name)
             .unwrap_or_else(|| panic!("missing breakdown entry for {name}"))
             .score
+    }
+
+    /// `QualityInputs` with every metric unavailable, to be overridden one
+    /// field at a time with `..`.
+    ///
+    /// A mapping test scores exactly one metric so the assertion cannot be
+    /// satisfied by some other metric moving the aggregate.
+    fn nothing_measured() -> QualityInputs {
+        QualityInputs {
+            dependency_freshness: Availability::failed("not under test"),
+            security: Availability::failed("not under test"),
+            unused: Availability::failed("not under test"),
+            unsafe_code: Availability::failed("not under test"),
+            clippy: Availability::failed("not under test"),
+            msrv: Availability::failed("not under test"),
+        }
+    }
+
+    /// The Security breakdown score the real scorer gives these counts, in
+    /// `[critical, high, moderate, low]` order.
+    ///
+    /// This is the reference side of the security mapping test: the scorer is
+    /// production code, so the test pins the `AuditOutput` -> `SecuritySummary`
+    /// correspondence without restating a penalty weight or a literal score.
+    fn security_reference_score(counts: [usize; 4]) -> Option<f32> {
+        let [critical, high, moderate, low] = counts;
+        let output = score_quality(QualityInputs {
+            security: Availability::Measured(SecuritySummary {
+                critical,
+                high,
+                moderate,
+                low,
+            }),
+            ..nothing_measured()
+        });
+        score_of(&output, METRIC_SECURITY)
+    }
+
+    fn unused_reference_score(unused_count: usize) -> Option<f32> {
+        let output = score_quality(QualityInputs {
+            unused: Availability::Measured(UnusedSummary { unused_count }),
+            ..nothing_measured()
+        });
+        score_of(&output, METRIC_UNUSED_DEPS)
+    }
+
+    fn unsafe_reference_score(total_unsafe: usize) -> Option<f32> {
+        let output = score_quality(QualityInputs {
+            unsafe_code: Availability::Measured(UnsafeSummary { total_unsafe }),
+            ..nothing_measured()
+        });
+        score_of(&output, METRIC_UNSAFE_CODE)
+    }
+
+    /// Asserts a fixture lands where a misread field can still move it.
+    ///
+    /// Every penalty here is `100u64.saturating_sub(..)`, so a fixture scoring
+    /// 100 (nothing to penalize) or 0 (clamped) can absorb a wrong count
+    /// without changing the number. A mapping test whose fixture sat at either
+    /// end would pass while proving nothing.
+    ///
+    /// The `expect` below is load-bearing rather than defensive. The callers
+    /// compare two `Option<f32>`, which would agree vacuously if the metric were
+    /// unavailable on both sides — a fixture wired into the wrong argument slot
+    /// scores `None`, and `None == None`. Unwrapping here forces the expected
+    /// side to be a real measurement before any comparison is reached.
+    fn assert_sensitive(score: Option<f32>) {
+        let score = score.expect("the metric under test must be measured");
+        assert!(
+            score > 0.0 && score < 100.0,
+            "fixture scores {score}, where a misread count could be absorbed by the \
+             0/100 clamp; choose counts that land strictly inside the range"
+        );
     }
 
     fn unavailable_entry<'a>(output: &'a QualityOutput, name: &str) -> &'a UnavailableMetric {
@@ -699,6 +925,154 @@ mod tests {
         );
 
         assert_eq!(score_of(&output, METRIC_CLIPPY), Some(reported_by_clippy));
+    }
+
+    /// `build_quality_output` must map `AuditOutput`'s severity counts onto the
+    /// matching `SecuritySummary` fields.
+    ///
+    /// This is the #37 hole in its worst form (#51). `SecuritySummary` has four
+    /// same-typed `usize` fields feeding four different penalty weights, so any
+    /// transposition compiles and silently reweights the metric — swapping
+    /// `critical` and `low` turns a 25-point deduction into a 2-point one. The
+    /// suite could not see it because `clean_audit()` is four zeros, and every
+    /// other `build_quality_output` test passes it.
+    ///
+    /// Two halves, and the first is what makes the second worth anything:
+    ///
+    /// 1. **The fixture is sensitive.** Each of the six pairwise swaps is run
+    ///    through the real scorer and must produce a different score. That is
+    ///    the property the test rests on, checked rather than assumed: the
+    ///    penalty weights are private to the scorer, so a note here asserting
+    ///    "the counts are distinct, therefore any swap shows" would go stale
+    ///    the moment a weight moved or a count was edited.
+    /// 2. **The mapping agrees.** The genuine `AuditOutput` goes through the
+    ///    genuine `build_quality_output`, and its Security entry must equal
+    ///    what the scorer produces for the summary those counts are supposed to
+    ///    become.
+    ///
+    /// No literal score and no weight appears here, for the reason
+    /// `clippy_command_and_quality_breakdown_agree` gives: the claim is that
+    /// the two sides agree, whatever the weights are.
+    /// `security_score_applies_penalties` in the scorer pins the values.
+    ///
+    /// Exact `f32` equality is sound because `security_score` returns
+    /// `100u64.saturating_sub(..) as f32`, which is always integer-valued, so
+    /// the scorer's `round_hundredths` is an identity on both sides.
+    #[test]
+    fn security_summary_mapping_is_not_swappable() {
+        let expected = security_reference_score(SECURITY_COUNTS);
+        assert_sensitive(expected);
+
+        for (left, right) in [(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)] {
+            let mut swapped = SECURITY_COUNTS;
+            swapped.swap(left, right);
+            assert_ne!(
+                security_reference_score(swapped),
+                expected,
+                "SECURITY_COUNTS is not sensitive to swapping fields {left} and {right} of \
+                 [critical, high, moderate, low]; a mapping that transposed them would score \
+                 the same and this test could not see it"
+            );
+        }
+
+        let output = build_quality_output(
+            Err(err()),
+            Ok(asymmetric_audit()),
+            Err(err()),
+            Err(err()),
+            Err(err()),
+            Err(err()),
+        );
+
+        assert_eq!(score_of(&output, METRIC_SECURITY), expected);
+    }
+
+    /// `build_quality_output` must count the *confirmed* unused dependencies.
+    ///
+    /// `UnusedSummary` has one field, so there is no transposition to make —
+    /// but `UnusedOutput` has two lists, and `unused_count` reads the length of
+    /// one of them. Reading `possibly_unused` instead, or summing the two,
+    /// penalizes the project for dependencies `cargo-machete` only suspected.
+    /// `clean_unused()` is empty on both lists, so that defect is invisible to
+    /// the rest of the suite for exactly the same reason the security swap is.
+    ///
+    /// The two lengths and their sum are pairwise distinct, checked below
+    /// rather than asserted in prose.
+    #[test]
+    fn unused_summary_mapping_reads_the_confirmed_list() {
+        let expected = unused_reference_score(UNUSED_CONFIRMED);
+        assert_sensitive(expected);
+
+        for wrong in [UNUSED_POSSIBLE, UNUSED_CONFIRMED + UNUSED_POSSIBLE] {
+            assert_ne!(
+                unused_reference_score(wrong),
+                expected,
+                "a mapping counting {wrong} entries would score the same as the correct \
+                 {UNUSED_CONFIRMED}; the fixture cannot tell the two apart"
+            );
+        }
+
+        let output = build_quality_output(
+            Err(err()),
+            Err(err()),
+            Err(err()),
+            Err(err()),
+            Ok(asymmetric_unused()),
+            Err(err()),
+        );
+
+        assert_eq!(score_of(&output, METRIC_UNUSED_DEPS), expected);
+    }
+
+    /// `build_quality_output` must read `total_unsafe`, not one of its six
+    /// siblings.
+    ///
+    /// `UnsafeSummary` is single-field, so this is the wrong-source-field case
+    /// rather than a swap: `UnsafeOutput`'s summary carries seven same-typed
+    /// `usize` counts and the mapping picks one. Reading `unsafe_blocks` — or
+    /// `packages`, which is not a count of unsafe anything — compiles and
+    /// reweights the metric. `clean_unsafe()` is seven zeros, so nothing else
+    /// in the suite can see which one was picked.
+    ///
+    /// The loop is the sensitivity check: substituting any sibling field must
+    /// change the score. It fails loudly if the fixture's counts are ever
+    /// edited into a shape where two fields coincide, or where the scorer's
+    /// diminishing-penalty plateau flattens two of them onto the same value.
+    #[test]
+    fn unsafe_summary_mapping_reads_the_total() {
+        let unsafe_output = asymmetric_unsafe();
+        let summary = &unsafe_output.summary;
+
+        let expected = unsafe_reference_score(summary.total_unsafe);
+        assert_sensitive(expected);
+
+        for (field, count) in [
+            ("packages", summary.packages),
+            ("unsafe_functions", summary.unsafe_functions),
+            ("unsafe_impls", summary.unsafe_impls),
+            ("unsafe_traits", summary.unsafe_traits),
+            ("unsafe_blocks", summary.unsafe_blocks),
+            ("unsafe_expressions", summary.unsafe_expressions),
+        ] {
+            assert_ne!(
+                unsafe_reference_score(count),
+                expected,
+                "a mapping reading `{field}` ({count}) instead of `total_unsafe` ({}) would \
+                 score the same; the fixture cannot tell the two apart",
+                summary.total_unsafe
+            );
+        }
+
+        let output = build_quality_output(
+            Err(err()),
+            Err(err()),
+            Err(err()),
+            Err(err()),
+            Err(err()),
+            Ok(unsafe_output),
+        );
+
+        assert_eq!(score_of(&output, METRIC_UNSAFE_CODE), expected);
     }
 
     #[test]
