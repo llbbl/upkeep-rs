@@ -181,9 +181,11 @@ fn find_member_nodes<'a>(
 #[derive(Debug, Default)]
 struct MemberVersions {
     member: String,
-    /// Keyed by the resolve-graph dep name: the lib target name with any rename
-    /// applied (`serde_json`, or the alias for a renamed dependency).
-    by_dep_name: HashMap<String, Version>,
+    /// Keyed by the resolve-graph dep name and dependency kind. The name is the lib
+    /// target name with any rename applied (`serde_json`, or the alias for a renamed
+    /// dependency). Cargo permits the same name in different dependency sections, so
+    /// the kind is required to keep those graph edges distinct.
+    by_dep_name: HashMap<(String, DependencyType), Version>,
     /// Keyed by the real package name (`serde-json`). Manifest dependency names use
     /// the package name, which differs from the lib target name whenever the crate
     /// name contains a dash.
@@ -194,6 +196,22 @@ struct MemberVersions {
     /// fallback in [`resolve_current_version`], reached after both `by_dep_name`
     /// lookups miss; a renamed edge never consults it at all.
     by_package_name: HashMap<String, Version>,
+}
+
+impl MemberVersions {
+    fn insert_dep_version(
+        &mut self,
+        name: impl Into<String>,
+        dependency_type: DependencyType,
+        version: Version,
+    ) {
+        self.by_dep_name
+            .insert((name.into(), dependency_type), version);
+    }
+
+    fn dep_version(&self, name: &str, dependency_type: DependencyType) -> Option<&Version> {
+        self.by_dep_name.get(&(name.to_string(), dependency_type))
+    }
 }
 
 fn build_resolved_versions(
@@ -214,9 +232,21 @@ fn build_resolved_versions(
             };
             for dep in &node.deps {
                 if let Some(package) = packages_by_id.get(&dep.pkg) {
-                    versions
-                        .by_dep_name
-                        .insert(dep.name.to_string(), package.version.clone());
+                    if dep.dep_kinds.is_empty() {
+                        versions.insert_dep_version(
+                            dep.name.to_string(),
+                            DependencyType::Normal,
+                            package.version.clone(),
+                        );
+                    } else {
+                        for dep_kind in &dep.dep_kinds {
+                            versions.insert_dep_version(
+                                dep.name.to_string(),
+                                convert_dependency_kind(dep_kind.kind),
+                                package.version.clone(),
+                            );
+                        }
+                    }
                     versions
                         .by_package_name
                         .entry(package.name.to_string())
@@ -466,8 +496,12 @@ fn resolve_dependencies(
             continue;
         };
 
-        let Some(current) = resolve_current_version(edge.alias.as_deref(), &edge.name, versions)
-        else {
+        let Some(current) = resolve_current_version(
+            edge.alias.as_deref(),
+            &edge.name,
+            edge.dependency_type,
+            versions,
+        ) else {
             skipped.push(unresolved_skip(&edge));
             continue;
         };
@@ -690,6 +724,7 @@ fn process_dependencies(
 fn resolve_current_version(
     alias: Option<&str>,
     dep_name: &str,
+    dependency_type: DependencyType,
     versions: &MemberVersions,
 ) -> Option<Version> {
     // A renamed edge is keyed in the resolve graph by its rename only. Falling back
@@ -698,21 +733,20 @@ fn resolve_current_version(
         // `dep.rename` is the raw Cargo.toml key, but the resolve graph normalizes it
         // the same way it does target names, so a dashed rename (`"my-itoa" = { package
         // = "itoa" }`) is keyed `my_itoa`. Stay inside `by_dep_name`: it is keyed by
-        // rename, so neither spelling can reach another edge's resolved version.
+        // rename and dependency kind, so neither spelling can reach another edge's
+        // resolved version.
         return versions
-            .by_dep_name
-            .get(alias)
-            .or_else(|| versions.by_dep_name.get(&alias.replace('-', "_")))
+            .dep_version(alias, dependency_type)
+            .or_else(|| versions.dep_version(&alias.replace('-', "_"), dependency_type))
             .cloned();
     }
 
     versions
-        .by_dep_name
-        .get(dep_name)
+        .dep_version(dep_name, dependency_type)
         // Manifest names use the package name; the resolve graph uses the lib target
         // name, which is the package name with dashes replaced (`pretty-assertions`
         // -> `pretty_assertions`).
-        .or_else(|| versions.by_dep_name.get(&dep_name.replace('-', "_")))
+        .or_else(|| versions.dep_version(&dep_name.replace('-', "_"), dependency_type))
         // Last resort: a crate with a custom `[lib] name` matching neither.
         .or_else(|| versions.by_package_name.get(dep_name))
         .cloned()
@@ -892,11 +926,11 @@ mod tests {
     /// Build a member's resolve maps the way cargo actually shapes them.
     ///
     /// `by_dep_name` is keyed by the lib target name (the package name with dashes
-    /// replaced by underscores); `by_package_name` is keyed by the real package name.
-    /// The two keys diverge exactly when the crate name contains a dash. Writing the
-    /// *same* key into both maps — as this fixture used to — makes every lookup path
-    /// in `resolve_current_version` look interchangeable, which is how an incorrect
-    /// fallback chain passed the whole unit suite.
+    /// replaced by underscores) plus dependency kind; `by_package_name` is keyed by
+    /// the real package name. The name shapes diverge exactly when the crate name
+    /// contains a dash. Writing the *same* name into both maps — as this fixture used
+    /// to — makes every lookup path in `resolve_current_version` look interchangeable,
+    /// which is how an incorrect fallback chain passed the whole unit suite.
     ///
     /// `deps` takes package names; pass a dashed name to exercise the divergent shape.
     fn member_versions(member: &str, deps: &[(&str, &str)]) -> MemberVersions {
@@ -906,9 +940,11 @@ mod tests {
         };
         for (name, version) in deps {
             let parsed = Version::parse(version).expect("parse version");
-            versions
-                .by_dep_name
-                .insert(name.replace('-', "_"), parsed.clone());
+            versions.insert_dep_version(
+                name.replace('-', "_"),
+                DependencyType::Normal,
+                parsed.clone(),
+            );
             versions
                 .by_package_name
                 .entry((*name).to_string())
@@ -921,8 +957,9 @@ mod tests {
     /// by nothing else, so it deliberately touches neither `by_package_name` nor the
     /// package's lib target name.
     fn insert_renamed(versions: &mut MemberVersions, rename: &str, version: &str) {
-        versions.by_dep_name.insert(
+        versions.insert_dep_version(
             rename.to_string(),
+            DependencyType::Normal,
             Version::parse(version).expect("parse version"),
         );
     }
@@ -990,14 +1027,11 @@ mod tests {
             member: "member".to_string(),
             ..MemberVersions::default()
         };
-        versions
-            .by_dep_name
-            .insert("alias".to_string(), Version::new(2, 0, 0));
-        versions
-            .by_dep_name
-            .insert("name".to_string(), Version::new(1, 0, 0));
+        versions.insert_dep_version("alias", DependencyType::Normal, Version::new(2, 0, 0));
+        versions.insert_dep_version("name", DependencyType::Normal, Version::new(1, 0, 0));
 
-        let resolved = resolve_current_version(Some("alias"), "name", &versions);
+        let resolved =
+            resolve_current_version(Some("alias"), "name", DependencyType::Normal, &versions);
         assert_eq!(resolved, Some(Version::new(2, 0, 0)));
     }
 
@@ -1011,15 +1045,13 @@ mod tests {
             member: "member".to_string(),
             ..MemberVersions::default()
         };
-        versions
-            .by_dep_name
-            .insert("name".to_string(), Version::new(1, 4, 2));
+        versions.insert_dep_version("name", DependencyType::Normal, Version::new(1, 4, 2));
         versions
             .by_package_name
             .insert("name".to_string(), Version::new(1, 4, 2));
 
         assert_eq!(
-            resolve_current_version(Some("alias"), "name", &versions),
+            resolve_current_version(Some("alias"), "name", DependencyType::Normal, &versions),
             None
         );
     }
@@ -1034,16 +1066,12 @@ mod tests {
             member: "member".to_string(),
             ..MemberVersions::default()
         };
-        versions
-            .by_dep_name
-            .insert("my_itoa".to_string(), Version::new(0, 4, 8));
+        versions.insert_dep_version("my_itoa", DependencyType::Normal, Version::new(0, 4, 8));
         // The plain edge on the same package sits alongside it at a different version.
-        versions
-            .by_dep_name
-            .insert("itoa".to_string(), Version::new(1, 0, 18));
+        versions.insert_dep_version("itoa", DependencyType::Normal, Version::new(1, 0, 18));
 
         assert_eq!(
-            resolve_current_version(Some("my-itoa"), "itoa", &versions),
+            resolve_current_version(Some("my-itoa"), "itoa", DependencyType::Normal, &versions),
             Some(Version::new(0, 4, 8)),
             "a dashed rename must resolve to its own edge, not the plain one"
         );
@@ -1054,9 +1082,12 @@ mod tests {
         // `wasm-bindgen` is a real dash-named crate: its lib target is `wasm_bindgen`,
         // so the manifest name never matches the resolve-graph key directly.
         let versions = member_versions("member", &[("wasm-bindgen", "0.2.100")]);
-        assert!(!versions.by_dep_name.contains_key("wasm-bindgen"));
+        assert!(versions
+            .dep_version("wasm-bindgen", DependencyType::Normal)
+            .is_none());
 
-        let resolved = resolve_current_version(None, "wasm-bindgen", &versions);
+        let resolved =
+            resolve_current_version(None, "wasm-bindgen", DependencyType::Normal, &versions);
         assert_eq!(resolved, Some(Version::parse("0.2.100").expect("parse")));
     }
 
@@ -1068,14 +1099,17 @@ mod tests {
             member: "member".to_string(),
             ..MemberVersions::default()
         };
-        versions
-            .by_dep_name
-            .insert("custom_lib_name".to_string(), Version::new(1, 4, 0));
+        versions.insert_dep_version(
+            "custom_lib_name",
+            DependencyType::Normal,
+            Version::new(1, 4, 0),
+        );
         versions
             .by_package_name
             .insert("odd-crate".to_string(), Version::new(1, 4, 0));
 
-        let resolved = resolve_current_version(None, "odd-crate", &versions);
+        let resolved =
+            resolve_current_version(None, "odd-crate", DependencyType::Normal, &versions);
         assert_eq!(resolved, Some(Version::new(1, 4, 0)));
     }
 
@@ -1086,9 +1120,12 @@ mod tests {
             ..MemberVersions::default()
         };
 
-        assert_eq!(resolve_current_version(None, "name", &versions), None);
         assert_eq!(
-            resolve_current_version(Some("alias"), "name", &versions),
+            resolve_current_version(None, "name", DependencyType::Normal, &versions),
+            None
+        );
+        assert_eq!(
+            resolve_current_version(Some("alias"), "name", DependencyType::Normal, &versions),
             None
         );
     }
@@ -1198,12 +1235,8 @@ mod tests {
             member: "solo".to_string(),
             ..MemberVersions::default()
         };
-        versions
-            .by_dep_name
-            .insert("rand".to_string(), Version::new(0, 8, 5));
-        versions
-            .by_dep_name
-            .insert("rand9".to_string(), Version::new(0, 9, 2));
+        versions.insert_dep_version("rand", DependencyType::Normal, Version::new(0, 8, 5));
+        versions.insert_dep_version("rand9", DependencyType::Normal, Version::new(0, 9, 2));
         versions
             .by_package_name
             .insert("rand".to_string(), Version::new(0, 8, 5));
@@ -1236,8 +1269,9 @@ mod tests {
             member: "solo".to_string(),
             ..MemberVersions::default()
         };
-        versions.by_dep_name.insert(
-            "wasm_bindgen".to_string(),
+        versions.insert_dep_version(
+            "wasm_bindgen",
+            DependencyType::Normal,
             Version::parse("0.2.100").expect("parse"),
         );
         insert_renamed(&mut versions, "wb1", "0.1.0");
@@ -1379,14 +1413,10 @@ mod tests {
             &[("serde", "1.0.200"), ("anyhow", "1.0.86")],
         )];
         let mut versions = members;
-        versions[0]
-            .by_dep_name
-            .insert("zzz".to_string(), Version::new(0, 1, 0));
+        versions[0].insert_dep_version("zzz", DependencyType::Normal, Version::new(0, 1, 0));
         // Deliberately out of order, and with 0.10 after 0.9 to prove semver (not
         // lexicographic) ordering of the version component.
-        versions[0]
-            .by_dep_name
-            .insert("aliased".to_string(), Version::new(0, 10, 0));
+        versions[0].insert_dep_version("aliased", DependencyType::Normal, Version::new(0, 10, 0));
 
         let mut older = edge("zzz", "^0.9", 0);
         older.alias = Some("aliased".to_string());
