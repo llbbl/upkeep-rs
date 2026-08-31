@@ -11,12 +11,16 @@ categories = ["development-tools::cargo-plugins", "command-line-utilities"]
 readme = "README.md"
 license = "MIT"
 rust-version = "1.96"
-# The test advisory-db fixture carries a deliberately fabricated advisory so an
-# integration test can prove `UPKEEP_ADVISORY_DB` was honoured. It is clearly
-# labelled as fake, but a published crate has no business shipping a document
-# that asserts a security advisory against somebody else's crate, so it stays
-# out of the package. See #19 for excluding dev-only files more broadly.
-exclude = ["tests/fixtures/**"]
+# Keep development and release automation out of the published crate. The test
+# advisory-db fixture is also excluded because it contains a deliberately
+# fabricated advisory used to test `UPKEEP_ADVISORY_DB`.
+exclude = [
+    ".github/workflows/**",
+    "cliff.toml",
+    "justfile",
+    "scripts/**",
+    "tests/fixtures/**",
+]
 
 [[bin]]
 name = "cargo-upkeep"
