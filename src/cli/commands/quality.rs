@@ -300,6 +300,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::{build_quality_output, check_msrv, msrv_status, run_blocking, MsrvStatus};
+    use crate::core::analyzers::clippy::parse_diagnostics;
     use crate::core::error::{ErrorCode, UpkeepError};
     use crate::core::output::{
         AuditOutput, AuditSummary, ClippyOutput, DependencyType, DepsOutput, Grade, MetricScore,
@@ -629,6 +630,67 @@ mod tests {
 
         // The failure text is gone from recommendations entirely.
         assert!(output.recommendations.is_empty());
+    }
+
+    /// `cargo upkeep clippy` and `cargo upkeep quality` must report the same
+    /// clippy score for the same lints.
+    ///
+    /// The penalty formula used to exist twice — once in `analyzers::clippy`,
+    /// once in `scorers::quality` — so changing a weight in one desynchronised
+    /// the two commands (#37). It is one function now, which makes a *unit*
+    /// test of the formula unable to catch a future split. This drives the two
+    /// real reporting paths end to end instead: one `parse_diagnostics` feeds
+    /// `ClippyOutput.score` on one side, and the same `ClippyOutput` goes
+    /// through the real `build_quality_output` to the Clippy breakdown entry on
+    /// the other.
+    ///
+    /// It lives here, not in `analyzers::clippy`, because the desync can also
+    /// be reintroduced *below* the formula: `build_quality_output` maps
+    /// `ClippyOutput` to `ClippySummary` field by field, and swapping the two
+    /// there would weight warnings at 10 and errors at 2 on the quality side
+    /// only. Every other `build_quality_output` test passes `clean_clippy()`,
+    /// which is `0, 0` and symmetric, so nothing else in the suite can see that
+    /// swap. Counts of 3 and 1 are deliberately unequal for the same reason.
+    ///
+    /// Deliberately not asserting a literal: the point is that the two agree,
+    /// whatever the weights are. `parse_clippy_output_counts_and_details` in
+    /// `analyzers::clippy` and `clippy_score_applies_penalties` in the scorer
+    /// pin the values, so a weight change stays a visible, deliberate edit.
+    ///
+    /// The comparison is exact `f32` equality, which is sound only because
+    /// `clippy_score` returns `100u64.saturating_sub(..) as f32` and is always
+    /// integer-valued, making the quality side's `round_hundredths` an identity.
+    /// A formula that returned a fractional score would need a tolerance here —
+    /// otherwise this fails while the two paths still agree, and reads as a
+    /// desync that isn't one.
+    #[test]
+    fn clippy_command_and_quality_breakdown_agree() {
+        let stdout = r#"{"reason":"compiler-message","message":{"level":"warning","code":{"code":"clippy::needless_return"},"message":"avoid needless return","spans":[{"file_name":"src/lib.rs","line_start":10,"is_primary":true}]}}
+{"reason":"compiler-message","message":{"level":"warning","code":{"code":"clippy::redundant_clone"},"message":"redundant clone","spans":[{"file_name":"src/lib.rs","line_start":20,"is_primary":true}]}}
+{"reason":"compiler-message","message":{"level":"warning","code":{"code":"clippy::needless_return"},"message":"avoid needless return","spans":[{"file_name":"src/lib.rs","line_start":30,"is_primary":true}]}}
+{"reason":"compiler-message","message":{"level":"error","code":{"code":"clippy::panic"},"message":"do not panic","spans":[{"file_name":"src/main.rs","line_start":42,"is_primary":true}]}}"#;
+
+        let analyzed = parse_diagnostics(stdout);
+        assert_eq!(analyzed.warnings, 3);
+        assert_eq!(analyzed.errors, 1);
+
+        // What `cargo upkeep clippy` prints, captured before the output is
+        // handed to the quality path.
+        let reported_by_clippy = analyzed.score;
+
+        // What `cargo upkeep quality` prints. Every other metric fails so the
+        // Clippy entry is the only one under test; the mapping and the scoring
+        // are production code, not restated here.
+        let output = build_quality_output(
+            Err(err()),
+            Err(err()),
+            Ok(analyzed),
+            Err(err()),
+            Err(err()),
+            Err(err()),
+        );
+
+        assert_eq!(score_of(&output, METRIC_CLIPPY), Some(reported_by_clippy));
     }
 
     #[test]

@@ -50,6 +50,24 @@ const SECURITY_PENALTY_MODERATE: u64 = 5;
 /// Points deducted per low severity vulnerability (2 points each)
 const SECURITY_PENALTY_LOW: u64 = 2;
 
+// === Clippy Penalty Multipliers ===
+// An error is weighted five times a warning. A clippy `error` is a lint the
+// analyzed project's own configuration puts at deny level: the correctness
+// group by default, or anything escalated with `-D`, a crate-level
+// `deny`/`forbid` attribute, or `[lints.clippy]`.
+//
+// The weight is a heuristic, not an inference from severity. Under a blanket
+// `-D warnings` — which `interpret_clippy_run` already expects to encounter —
+// every advisory lint becomes an error, so an error does not necessarily name a
+// rule the project singled out as unshippable. `push_driver_error` also counts
+// a synthesized `clippy::driver` entry as an error, and that is a non-zero exit
+// status rather than a lint at all.
+
+/// Points deducted per clippy warning (2 points each)
+const CLIPPY_PENALTY_WARNING: u64 = 2;
+/// Points deducted per clippy error (10 points each)
+const CLIPPY_PENALTY_ERROR: u64 = 10;
+
 /// Dependency freshness over the dependencies that were *actually checked*.
 ///
 /// `total` is deliberately not "every dependency declared": a dependency whose
@@ -294,10 +312,21 @@ fn security_score(summary: &SecuritySummary) -> f32 {
     100u64.saturating_sub(penalty) as f32
 }
 
-fn clippy_score(summary: &ClippySummary) -> f32 {
+/// The single definition of the clippy penalty, shared by both reporting paths.
+///
+/// `cargo upkeep clippy` puts this in `ClippyOutput.score` and `cargo upkeep
+/// quality` puts it in the Clippy breakdown entry. The analyzer used to carry
+/// its own copy of this arithmetic, so changing a weight here silently
+/// desynchronised the two commands (#37). Scoring policy lives with the scorer,
+/// alongside the weights and the sibling penalties, and
+/// `clippy_command_and_quality_breakdown_agree` in `cli::commands::quality`
+/// holds the two paths together — there rather than here because it also covers
+/// the `ClippyOutput` -> `ClippySummary` mapping, where the same desync can be
+/// reintroduced by swapping two fields.
+pub(crate) fn clippy_score(summary: &ClippySummary) -> f32 {
     let penalty = (summary.warnings as u64)
-        .saturating_mul(2)
-        .saturating_add((summary.errors as u64).saturating_mul(10));
+        .saturating_mul(CLIPPY_PENALTY_WARNING)
+        .saturating_add((summary.errors as u64).saturating_mul(CLIPPY_PENALTY_ERROR));
     100u64.saturating_sub(penalty) as f32
 }
 
