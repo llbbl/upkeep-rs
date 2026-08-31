@@ -2,6 +2,7 @@ use cargo_metadata::{
     Dependency, DependencyKind, Metadata, MetadataCommand, Node, Package, PackageId,
 };
 use semver::Version;
+use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use super::run_with::run_with_output;
@@ -192,10 +193,17 @@ struct MemberVersions {
     ///
     /// Cargo emits `node.deps` in package-id order, which says nothing about whether
     /// an edge was renamed, so when one package name has several resolved instances
-    /// the first writer here is arbitrary. This map is therefore only a last-resort
-    /// fallback in [`resolve_current_version`], reached after both `by_dep_name`
-    /// lookups miss; a renamed edge never consults it at all.
-    by_package_name: HashMap<String, Version>,
+    /// no writer here is more authoritative than another. This map is therefore only
+    /// a last-resort fallback in [`resolve_current_version`], reached after both
+    /// `by_dep_name` lookups miss; a renamed edge never consults it at all.
+    ///
+    /// `None` is a *poisoned* entry: the package name resolved to more than one
+    /// distinct version in this member, so no lookup through it can say which
+    /// instance an edge meant. Poisoning makes that ambiguity fail closed — the
+    /// edge is reported as [`SkipReason::AmbiguousResolve`] rather than handed a
+    /// coin-flip version that could pair an impossible `current` with the edge's
+    /// own `required`.
+    by_package_name: HashMap<String, Option<Version>>,
 }
 
 impl MemberVersions {
@@ -211,6 +219,43 @@ impl MemberVersions {
 
     fn dep_version(&self, name: &str, dependency_type: DependencyType) -> Option<&Version> {
         self.by_dep_name.get(&(name.to_string(), dependency_type))
+    }
+
+    /// Records one resolved instance under its real package name.
+    ///
+    /// The same version arriving twice is not ambiguity and must not poison the
+    /// entry. Ordinary manifests cannot produce that repeat — cargo rejects one
+    /// package depended on twice under different names ("depends on crate ...
+    /// multiple times with different names"), and rejects two package ids sharing
+    /// a name and version ("package collision in the lockfile"). The equal-version
+    /// arm is defensive: `-Zbindeps` artifact dependencies can put one package id
+    /// in `node.deps` more than once, and tolerating a repeat costs nothing.
+    ///
+    /// A *second distinct* version poisons permanently: once poisoned, no later
+    /// insert can un-poison it, because a third instance agreeing with one of the
+    /// first two still leaves the name pointing at more than one version.
+    fn insert_package_version(&mut self, name: impl Into<String>, version: Version) {
+        match self.by_package_name.entry(name.into()) {
+            Entry::Vacant(slot) => {
+                slot.insert(Some(version));
+            }
+            Entry::Occupied(mut slot) => {
+                if slot.get().as_ref().is_some_and(|seen| *seen != version) {
+                    slot.insert(None);
+                }
+            }
+        }
+    }
+
+    /// The unique version resolved for a package name, or [`None`] when the name is
+    /// absent *or* poisoned. [`Self::is_ambiguous_package_name`] separates the two.
+    fn package_version(&self, name: &str) -> Option<&Version> {
+        self.by_package_name.get(name).and_then(Option::as_ref)
+    }
+
+    /// Whether `name` resolved to several distinct versions in this member.
+    fn is_ambiguous_package_name(&self, name: &str) -> bool {
+        matches!(self.by_package_name.get(name), Some(None))
     }
 }
 
@@ -248,9 +293,7 @@ fn build_resolved_versions(
                         }
                     }
                     versions
-                        .by_package_name
-                        .entry(package.name.to_string())
-                        .or_insert_with(|| package.version.clone());
+                        .insert_package_version(package.name.to_string(), package.version.clone());
                 }
             }
             versions
@@ -492,7 +535,7 @@ fn resolve_dependencies(
         let Some(versions) = member_versions.get(edge.member_index) else {
             // Unreachable while edges are built from the same member slice; treat a
             // desynchronised index as an unresolved edge rather than panicking.
-            skipped.push(unresolved_skip(&edge));
+            skipped.push(unresolved_skip(&edge, false));
             continue;
         };
 
@@ -502,7 +545,19 @@ fn resolve_dependencies(
             edge.dependency_type,
             versions,
         ) else {
-            skipped.push(unresolved_skip(&edge));
+            // Only reachable once every lookup in `resolve_current_version` missed,
+            // so this mirrors that function's chain rather than re-guessing it: a
+            // renamed edge never consults `by_package_name`, and the raw `edge.name`
+            // used here is the same key the fallback used, with no dash substitution
+            // on either side.
+            //
+            // It is not an exact test for *why* the edge failed. An edge that was
+            // never in the resolve graph at all — an inactive optional, or one for a
+            // foreign target — whose package name happens to be poisoned by two
+            // unrelated instances is also reported here. That is deliberate; see
+            // `unresolved_skip` for why the fail-closed reason wins.
+            let ambiguous = edge.alias.is_none() && versions.is_ambiguous_package_name(&edge.name);
+            skipped.push(unresolved_skip(&edge, ambiguous));
             continue;
         };
 
@@ -548,8 +603,17 @@ fn resolve_dependencies(
         .collect()
 }
 
-fn unresolved_skip(edge: &DependencyEdge) -> SkippedDependency {
-    let reason = if edge.optional {
+/// Explains why an edge produced no version.
+///
+/// `ambiguous` takes precedence over `optional` and `target`: those two say the
+/// edge was never expected in the resolve graph, but ambiguity says a comparison
+/// was genuinely owed and refused. Crediting an ambiguous edge as
+/// "not applicable" would put it back in the freshness denominator as though the
+/// question had been settled, so the reason that fails closed wins.
+fn unresolved_skip(edge: &DependencyEdge, ambiguous: bool) -> SkippedDependency {
+    let reason = if ambiguous {
+        SkipReason::AmbiguousResolve
+    } else if edge.optional {
         SkipReason::OptionalNotActivated
     } else if edge.target.is_some() {
         SkipReason::TargetSpecific
@@ -616,9 +680,11 @@ fn registry_batch_failure_warnings(names: &[String], detail: &str) -> Vec<String
 /// A git, path or inactive-optional dependency has no crates.io release to be
 /// behind, so it is neither outdated nor unchecked — it belongs in the freshness
 /// denominator, as one unit, exactly like a group that was compared and found
-/// current. `RegistryUnavailable`, `RegistryMetadataMissing`, and
-/// `UnsupportedRegistry` are the opposite case: a comparison was owed and could
-/// not be made, so they stay out.
+/// current. `RegistryUnavailable`, `RegistryMetadataMissing`,
+/// `UnsupportedRegistry`, `MissingResolve`, and `AmbiguousResolve` are the
+/// opposite case: a comparison was owed and could not be made, so they stay out.
+/// An ambiguous resolve belongs to that second group — the crate has a crates.io
+/// release and we simply refused to guess which instance to compare it against.
 ///
 /// These entries are already deduplicated by [`SkippedCollector`] across every
 /// non-kind identity field, with dependency kinds merged, so a crate declared identically by three members
@@ -747,8 +813,10 @@ fn resolve_current_version(
         // name, which is the package name with dashes replaced (`pretty-assertions`
         // -> `pretty_assertions`).
         .or_else(|| versions.dep_version(&dep_name.replace('-', "_"), dependency_type))
-        // Last resort: a crate with a custom `[lib] name` matching neither.
-        .or_else(|| versions.by_package_name.get(dep_name))
+        // Last resort: a crate with a custom `[lib] name` matching neither. A
+        // poisoned entry misses here, which is what turns an ambiguous package name
+        // into a skip instead of an arbitrary instance's version.
+        .or_else(|| versions.package_version(dep_name))
         .cloned()
 }
 
@@ -945,10 +1013,7 @@ mod tests {
                 DependencyType::Normal,
                 parsed.clone(),
             );
-            versions
-                .by_package_name
-                .entry((*name).to_string())
-                .or_insert(parsed);
+            versions.insert_package_version(*name, parsed);
         }
         versions
     }
@@ -1046,9 +1111,7 @@ mod tests {
             ..MemberVersions::default()
         };
         versions.insert_dep_version("name", DependencyType::Normal, Version::new(1, 4, 2));
-        versions
-            .by_package_name
-            .insert("name".to_string(), Version::new(1, 4, 2));
+        versions.insert_package_version("name", Version::new(1, 4, 2));
 
         assert_eq!(
             resolve_current_version(Some("alias"), "name", DependencyType::Normal, &versions),
@@ -1104,13 +1167,72 @@ mod tests {
             DependencyType::Normal,
             Version::new(1, 4, 0),
         );
-        versions
-            .by_package_name
-            .insert("odd-crate".to_string(), Version::new(1, 4, 0));
+        versions.insert_package_version("odd-crate", Version::new(1, 4, 0));
 
         let resolved =
             resolve_current_version(None, "odd-crate", DependencyType::Normal, &versions);
         assert_eq!(resolved, Some(Version::new(1, 4, 0)));
+    }
+
+    #[test]
+    fn insert_package_version_poisons_only_on_a_second_distinct_version() {
+        let mut versions = MemberVersions {
+            member: "member".to_string(),
+            ..MemberVersions::default()
+        };
+
+        versions.insert_package_version("wasm-bindgen", Version::new(0, 2, 100));
+        assert_eq!(
+            versions.package_version("wasm-bindgen"),
+            Some(&Version::new(0, 2, 100))
+        );
+        assert!(!versions.is_ambiguous_package_name("wasm-bindgen"));
+
+        // The same version arriving again is not ambiguity and must not poison: cargo
+        // emits one node dep per edge, so a package reached under both a rename and its
+        // own name shows up twice at one version.
+        versions.insert_package_version("wasm-bindgen", Version::new(0, 2, 100));
+        assert_eq!(
+            versions.package_version("wasm-bindgen"),
+            Some(&Version::new(0, 2, 100)),
+            "a repeated identical version must not poison the entry"
+        );
+
+        versions.insert_package_version("wasm-bindgen", Version::new(0, 1, 0));
+        assert!(versions.is_ambiguous_package_name("wasm-bindgen"));
+        assert_eq!(versions.package_version("wasm-bindgen"), None);
+
+        // Poisoning is permanent: a third instance agreeing with one of the first two
+        // still leaves the name pointing at more than one version.
+        versions.insert_package_version("wasm-bindgen", Version::new(0, 2, 100));
+        assert!(versions.is_ambiguous_package_name("wasm-bindgen"));
+
+        // Poisoning is per package name, not global.
+        versions.insert_package_version("serde", Version::new(1, 0, 200));
+        assert_eq!(
+            versions.package_version("serde"),
+            Some(&Version::new(1, 0, 200))
+        );
+    }
+
+    #[test]
+    fn resolve_current_version_refuses_a_poisoned_package_name() {
+        // The package-name fallback is the only lookup that cannot say which instance
+        // an edge meant, so when it is ambiguous it must resolve to nothing rather than
+        // to whichever instance cargo happened to emit first.
+        let mut versions = MemberVersions {
+            member: "member".to_string(),
+            ..MemberVersions::default()
+        };
+        versions.insert_dep_version("wb_lib", DependencyType::Normal, Version::new(0, 2, 100));
+        insert_renamed(&mut versions, "wb1", "0.1.0");
+        versions.insert_package_version("wasm-bindgen", Version::new(0, 1, 0));
+        versions.insert_package_version("wasm-bindgen", Version::new(0, 2, 100));
+
+        assert_eq!(
+            resolve_current_version(None, "wasm-bindgen", DependencyType::Normal, &versions),
+            None
+        );
     }
 
     #[test]
@@ -1237,9 +1359,7 @@ mod tests {
         };
         versions.insert_dep_version("rand", DependencyType::Normal, Version::new(0, 8, 5));
         versions.insert_dep_version("rand9", DependencyType::Normal, Version::new(0, 9, 2));
-        versions
-            .by_package_name
-            .insert("rand".to_string(), Version::new(0, 8, 5));
+        versions.insert_package_version("rand", Version::new(0, 8, 5));
 
         let mut renamed = edge("rand", "^0.9", 0);
         renamed.alias = Some("rand9".to_string());
@@ -1275,9 +1395,10 @@ mod tests {
             Version::parse("0.2.100").expect("parse"),
         );
         insert_renamed(&mut versions, "wb1", "0.1.0");
-        versions
-            .by_package_name
-            .insert("wasm-bindgen".to_string(), Version::new(0, 1, 0));
+        // Only the aliased instance is registered under the package name, which is the
+        // hostile shape for this test: the plain edge must find its own 0.2.100 via the
+        // lib target name without ever consulting the fallback.
+        versions.insert_package_version("wasm-bindgen", Version::new(0, 1, 0));
 
         let edges = vec![
             edge("wasm-bindgen", "=0.2.100", 0),
@@ -1298,6 +1419,97 @@ mod tests {
         assert_eq!(resolved[1].alias, None);
         assert_eq!(resolved[1].required, "=0.2.100");
         assert!(skipped.into_vec().is_empty());
+    }
+
+    #[test]
+    fn resolve_dependencies_skips_a_custom_lib_name_edge_with_an_ambiguous_package_name() {
+        // The residual of the same bug class, with the one shape that still reaches the
+        // package-name fallback: `wasm-bindgen = "=0.2.100"` where the crate carries a
+        // custom `[lib] name = "wb_lib"`, plus
+        // `wb1 = { package = "wasm-bindgen", version = "0.1" }`.
+        //
+        // The plain edge is spelled `wasm-bindgen`, which matches neither the resolve
+        // key `wb_lib` nor its dash-substituted form `wasm_bindgen`, so it falls through
+        // to `by_package_name` — where two distinct versions of `wasm-bindgen` live and
+        // cargo's package-id ordering decides which one a first-writer-wins map keeps.
+        // Here that is the *aliased* instance's 0.1.0, which would report the impossible
+        // pair `current 0.1.0` / `required =0.2.100`. Poisoning makes the lookup fail
+        // instead, and the edge is skipped as `ambiguous_resolve`.
+        let mut versions = MemberVersions {
+            member: "solo".to_string(),
+            ..MemberVersions::default()
+        };
+        versions.insert_dep_version(
+            "wb_lib",
+            DependencyType::Normal,
+            Version::parse("0.2.100").expect("parse"),
+        );
+        insert_renamed(&mut versions, "wb1", "0.1.0");
+        // Both instances are the same package, so both land under the one package name.
+        // The aliased 0.1.0 is written first, which is the ordering that used to decide
+        // the plain edge's answer.
+        versions.insert_package_version("wasm-bindgen", Version::new(0, 1, 0));
+        versions.insert_package_version("wasm-bindgen", Version::parse("0.2.100").expect("parse"));
+
+        let edges = vec![
+            edge("wasm-bindgen", "=0.2.100", 0),
+            aliased_edge("wasm-bindgen", "wb1", "^0.1", 0),
+        ];
+
+        let mut skipped = SkippedCollector::new();
+        let resolved = resolve_dependencies(edges, &[versions], &mut skipped);
+        let skipped = skipped.into_vec();
+
+        assert_eq!(
+            skipped.len(),
+            1,
+            "the plain edge cannot be resolved and must be reported, not guessed at"
+        );
+        assert_eq!(skipped[0].name, "wasm-bindgen");
+        assert_eq!(skipped[0].alias, None);
+        assert_eq!(skipped[0].required, "=0.2.100");
+        assert_eq!(skipped[0].reason, SkipReason::AmbiguousResolve);
+        // A refused comparison is not a "not applicable" one.
+        assert_eq!(not_applicable_count(&skipped), 0);
+
+        // The aliased edge is keyed by its rename and is unaffected by the ambiguity.
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].current, Version::new(0, 1, 0));
+        assert_eq!(resolved[0].alias, Some("wb1".to_string()));
+        assert_eq!(resolved[0].required, "^0.1");
+    }
+
+    #[test]
+    fn resolve_dependencies_prefers_ambiguity_over_optional_for_a_poisoned_name() {
+        // An optional edge that is genuinely ambiguous must not be filed as
+        // `optional_not_activated`: that reason is "not applicable" and would credit the
+        // freshness denominator with a comparison we refused to make.
+        let mut versions = MemberVersions {
+            member: "solo".to_string(),
+            ..MemberVersions::default()
+        };
+        versions.insert_dep_version(
+            "wb_lib",
+            DependencyType::Normal,
+            Version::parse("0.2.100").expect("parse"),
+        );
+        insert_renamed(&mut versions, "wb1", "0.1.0");
+        versions.insert_package_version("wasm-bindgen", Version::new(0, 1, 0));
+        versions.insert_package_version("wasm-bindgen", Version::parse("0.2.100").expect("parse"));
+
+        let optional = DependencyEdge {
+            optional: true,
+            ..edge("wasm-bindgen", "=0.2.100", 0)
+        };
+
+        let mut skipped = SkippedCollector::new();
+        let resolved = resolve_dependencies(vec![optional], &[versions], &mut skipped);
+        let skipped = skipped.into_vec();
+
+        assert!(resolved.is_empty());
+        assert_eq!(skipped.len(), 1);
+        assert_eq!(skipped[0].reason, SkipReason::AmbiguousResolve);
+        assert_eq!(not_applicable_count(&skipped), 0);
     }
 
     #[test]
@@ -1598,6 +1810,11 @@ mod tests {
             skipped_with(SkipReason::RegistryUnavailable),
             skipped_with(SkipReason::RegistryMetadataMissing),
             skipped_with(SkipReason::MissingResolve),
+            // An ambiguous resolve is a comparison that was owed and refused, not one
+            // that never existed: the crate has a crates.io release and we declined to
+            // guess which resolved instance to measure it against. It stays out of the
+            // denominator alongside the registry failures.
+            skipped_with(SkipReason::AmbiguousResolve),
         ];
 
         assert_eq!(not_applicable_count(&skipped), 3);

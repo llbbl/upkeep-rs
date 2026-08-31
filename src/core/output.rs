@@ -45,8 +45,8 @@ pub struct DepsOutput {
     /// a git or path dependency has no registry release to be behind, so it is
     /// neither outdated nor unchecked. Groups the registry could not answer for
     /// (`RegistryUnavailable`, `RegistryMetadataMissing`, `UnsupportedRegistry`,
-    /// `MissingResolve`) are excluded — those are comparisons that were owed and
-    /// never made.
+    /// `MissingResolve`, `AmbiguousResolve`) are excluded — those are comparisons
+    /// that were owed and never made.
     ///
     /// `outdated <= checked` holds, which is what makes `(checked - outdated) /
     /// checked` a meaningful freshness ratio. Deriving that denominator as
@@ -340,6 +340,11 @@ pub enum DependencyType {
 pub enum SkipReason {
     NonRegistry,
     MissingResolve,
+    /// The declared package name resolved to several distinct versions within one
+    /// member and the edge matched none of the resolve-graph keys that would say
+    /// which instance it is. Reporting either version would be a coin flip, so the
+    /// edge is skipped instead.
+    AmbiguousResolve,
     OptionalNotActivated,
     TargetSpecific,
     RegistryMetadataMissing,
@@ -802,6 +807,7 @@ impl fmt::Display for SkipReason {
         let label = match self {
             SkipReason::NonRegistry => "non_registry",
             SkipReason::MissingResolve => "missing_resolve",
+            SkipReason::AmbiguousResolve => "ambiguous_resolve",
             SkipReason::OptionalNotActivated => "optional_not_activated",
             SkipReason::TargetSpecific => "target_specific",
             SkipReason::RegistryMetadataMissing => "registry_metadata_missing",
@@ -904,6 +910,12 @@ mod tests {
         assert_eq!(
             serde_json::to_value(SkipReason::UnsupportedRegistry).unwrap(),
             Value::String("unsupported_registry".into())
+        );
+        // Pinned because it is a user-visible addition to the `skipped_packages[].reason`
+        // contract; the Display label above must not drift from it either.
+        assert_eq!(
+            serde_json::to_value(SkipReason::AmbiguousResolve).unwrap(),
+            Value::String("ambiguous_resolve".into())
         );
         assert_eq!(
             serde_json::to_value(Grade::A).unwrap(),
@@ -1560,6 +1572,10 @@ mod tests {
         assert_eq!(
             format!("{}", SkipReason::UnsupportedRegistry),
             "unsupported_registry"
+        );
+        assert_eq!(
+            format!("{}", SkipReason::AmbiguousResolve),
+            "ambiguous_resolve"
         );
         assert_eq!(format!("{}", Grade::F), "F");
     }
