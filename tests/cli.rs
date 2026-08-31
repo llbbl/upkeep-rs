@@ -13,9 +13,6 @@ use std::process::Command;
 /// binary stops honouring the variable.
 const ADVISORY_DB_ENV: &str = "UPKEEP_ADVISORY_DB";
 
-/// Advisory ID carried only by the fixture database.
-const FIXTURE_ADVISORY_ID: &str = "RUSTSEC-2099-0001";
-
 /// The committed advisory-database fixture — see its README.
 ///
 /// Panics rather than falling back to the real database if the fixture is
@@ -206,44 +203,39 @@ fn cli_audit_command_works_without_lockfile() {
         .args(["audit", "--json"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("\"vulnerabilities\""));
+        .stdout(predicate::str::contains("\"vulnerabilities\""))
+        .stdout(predicate::str::contains("\"warnings\""));
 }
 
-/// `UPKEEP_ADVISORY_DB` really is the database that gets read.
+/// `UPKEEP_ADVISORY_DB` is wired through the CLI to the analyzer.
 ///
-/// The fixture carries a fabricated advisory against `serde` that no real
-/// database contains, so this fails if the binary ignores the variable and
-/// fetches `~/.cargo/advisory-db` instead — which is what every other test in
-/// this file relies on not happening.
-///
-/// It runs against this repository because the advisory has to match a resolved
-/// dependency, and the temp crates the other tests build have no dependencies.
-/// No network: `cargo metadata` and the committed `Cargo.lock` are enough.
+/// A deliberately missing path must be named in the structured stderr error.
+/// This directly catches the binary ignoring the variable without requiring a
+/// successful standalone audit, which now also performs a live crates.io yanked
+/// check. Fixture contents and informational mapping are covered in analyzer
+/// tests without any registry access.
 #[test]
-fn cli_audit_uses_local_advisory_db_from_env() {
+fn cli_audit_honors_local_advisory_db_env() {
+    let temp_dir = create_temp_crate("cli-audit-local-db");
+    let missing = temp_dir.path().join("missing-advisory-db");
     let output = upkeep_cmd()
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .env(ADVISORY_DB_ENV, &missing)
+        .current_dir(temp_dir.path())
         .args(["audit", "--json"])
         .output()
         .expect("run audit");
     assert!(
-        output.status.success(),
-        "audit failed; stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
+        !output.status.success(),
+        "audit unexpectedly succeeded; stdout: {}",
+        String::from_utf8_lossy(&output.stdout)
     );
 
-    let json: Value = serde_json::from_slice(&output.stdout).expect("parse audit json");
-    let found = json["vulnerabilities"]
-        .as_array()
-        .expect("vulnerabilities array")
-        .iter()
-        .find(|vuln| vuln["id"] == FIXTURE_ADVISORY_ID)
-        .unwrap_or_else(|| {
-            panic!(
-                "{FIXTURE_ADVISORY_ID} missing; the fixture database was not the one read: {json}"
-            )
-        });
-    assert_eq!(found["package"], "serde");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("failed to open RustSec advisory database")
+            && stderr.contains(missing.to_string_lossy().as_ref()),
+        "expected local advisory path in stderr; stderr: {stderr}"
+    );
 }
 
 #[test]

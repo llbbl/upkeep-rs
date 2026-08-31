@@ -205,6 +205,20 @@ cargo upkeep audit --json
       "fix_available": true
     }
   ],
+  "warnings": [
+    {
+      "kind": "unmaintained",
+      "package": "example-old",
+      "package_version": "0.1.0",
+      "advisory_id": "RUSTSEC-0000-0001",
+      "title": "Example crate is unmaintained",
+      "path": [
+        "root",
+        "example-old"
+      ],
+      "fix_available": false
+    }
+  ],
   "summary": {
     "critical": 0,
     "high": 1,
@@ -217,9 +231,12 @@ cargo upkeep audit --json
 
 Scope notes:
 
-- Advisories are matched against resolved crates.io dependencies from the lockfile.
+- Vulnerability and informational advisories are matched against resolved crates.io dependencies from the lockfile.
+- `warnings` contains RustSec `notice`, `unmaintained`, and `unsound` advisories plus yanked resolved versions. Yanked entries have `null` advisory metadata and `fix_available` because a yank alone does not identify a replacement.
+- Warnings are not vulnerabilities. They do not contribute to `summary`, and they do not affect the vulnerability-based security grade in `quality`.
+- Standalone `audit` refreshes the crates.io index to check yanked versions. An index or per-package lookup failure fails the command rather than returning a false clean warning list; JSON errors are written to stderr.
 - Path, git, vendored, and alternate-registry dependencies are not reported as advisory matches.
-- The same effective RustSec scope applies to `deps --security` and to the security metric inside `quality`.
+- `deps --security` and the security metric inside `quality` intentionally run the vulnerability-only scan: they do not fetch the index for yanked checks and do not consume informational warnings.
 
 ## quality
 

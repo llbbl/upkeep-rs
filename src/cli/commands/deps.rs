@@ -6,7 +6,7 @@ use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use super::run_with::run_with_output;
-use crate::core::analyzers::audit::run_audit;
+use crate::core::analyzers::audit::run_vulnerability_audit;
 use crate::core::analyzers::crates_io::{CratesIoClient, VersionInfo};
 use crate::core::error::{ErrorCode, Result, UpkeepError};
 use crate::core::output::{
@@ -933,7 +933,7 @@ fn classify_update(current: &Version, latest: &Version) -> UpdateType {
 }
 
 async fn fetch_security(dependencies: &[ResolvedDependency]) -> Result<DepsSecurityOutput> {
-    let audit_output = tokio::task::spawn_blocking(run_audit)
+    let audit_output = tokio::task::spawn_blocking(run_vulnerability_audit)
         .await
         .map_err(|err| {
             let reason = if err.is_panic() {

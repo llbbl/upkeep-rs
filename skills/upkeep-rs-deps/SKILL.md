@@ -43,6 +43,8 @@ Goal: Safely update Rust dependencies with risk assessment, verification, and cl
 - Provide a table: crate, current, target, risk, notes.
 - Flag majors as high risk, minors as medium, patches as low.
 - Call out any build or test failures with next steps.
+- `deps --security` reports vulnerabilities only. Use `cargo upkeep audit` when
+  the request also needs informational advisories or yanked resolved versions.
 
 ## Example
 User: "Update dependencies for this repo."
