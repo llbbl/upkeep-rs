@@ -18,7 +18,7 @@ cargo binstall cargo-upkeep
 
 ## Install script
 
-The install script downloads the matching release archive, verifies its SHA-256 checksum, installs the binary, and also installs the companion Claude Code skills unless you opt out.
+The install script resolves one release tag, downloads and verifies the matching binary archive, and installs the companion Claude Code skills from that same tag unless you opt out. This keeps the binary and its skill instructions on the same version.
 
 Binary plus skills:
 
@@ -34,9 +34,11 @@ SKIP_SKILLS=1 curl -fsSL https://raw.githubusercontent.com/llbbl/upkeep-rs/main/
 
 The script also accepts:
 
-- `VERSION` to pin a release tag instead of `latest`
+- `VERSION` to pin the binary, checksum, and skills to an exact release tag instead of resolving `latest`
 - `INSTALL_DIR` to choose the binary install path
 - `SKILLS_DIR` to change where the Claude Code skills are installed
+
+After installation, the script lists skills under separate `installed`, `skipped`, and `failed` headings. If any requested skill fails, the script exits with a nonzero status after printing that summary; the verified binary remains installed. `SKIP_SKILLS=1` bypasses skill downloads and reports all companion skills as skipped.
 
 ## From source
 

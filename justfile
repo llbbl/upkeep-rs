@@ -21,6 +21,11 @@ run *args:
 # Run tests
 test:
   cargo test
+  just test-installer
+
+# Run fixture-driven installer tests without network access
+test-installer:
+  bash ./tests/install.sh
 
 # Run tests with output
 test-verbose:
