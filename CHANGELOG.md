@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.3.3] - 2026-08-31
+
+### Bug Fixes
+
+- **deps:** Make registry lookups failure-tolerant
 ## [0.3.2] - 2026-08-30
 
 ### Bug Fixes
