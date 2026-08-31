@@ -165,38 +165,55 @@ pub fn is_missing_subcommand(stderr: &str, tool_name: &str) -> bool {
     })
 }
 
-/// Patterns clap uses to report an argument it does not recognize.
+/// Patterns the argument parsers behind us use to report a flag they do not
+/// recognize.
 ///
-/// clap's wording changed at the 4.0 boundary. clap 2 and 3 emit
+/// Two parsers are covered, because the two tools this drives do not use the
+/// same one — and neither uses clap.
+///
+/// **clap**, whose wording changed at the 4.0 boundary. clap 2 and 3 emit
 /// ``error: Found argument '--output-format' which wasn't expected, or isn't
 /// valid in this context``; clap 4 emits
 /// ``error: unexpected argument '--output-format' found``. Both are matched.
+/// clap reaches us second-hand, from a **nested** `cargo` invocation — geiger
+/// shells out to `cargo metadata`, and cargo is clap 4.
 ///
-/// **The tools themselves do not use clap**, so this wording reaches us
-/// second-hand. `cargo-machete` parses with `argh` and says
-/// `Unrecognized argument: --json`, which matches nothing here;
-/// `cargo-geiger` parses with `pico-args`, whose error type has no
-/// unknown-argument variant at all, so it ignores an unrecognized flag in
-/// silence. The realistic source of clap wording is a **nested** `cargo`
-/// invocation — geiger shells out to `cargo metadata`, and cargo is clap 4.
+/// **argh**, which `cargo-machete` uses (every release from 0.5.0 through
+/// 0.9.2). Its wording is `Unrecognized argument: --json`, captured verbatim
+/// by running `cargo machete --json` against a pinned 0.9.2 binary, not
+/// recalled from documentation. That is not a hypothetical older release:
+/// **no published `cargo-machete` accepts `--json`** — the flag exists only on
+/// the project's unreleased master — so without this pattern the `unused.rs`
+/// fallback never fires and the analyzer fails outright against every
+/// installable version of the tool.
 ///
-/// That makes the two fallbacks these patterns drive (`unsafe_code.rs` and
-/// `unused.rs` retrying with an alternate flag spelling) largely inert against
-/// released versions of either tool. Nothing is broken by that today — current
-/// machete accepts `--json` and current geiger accepts `--output-format`, so
-/// the first attempt succeeds. See #55 for teaching this argh's wording.
+/// `cargo-geiger` is the case no pattern can reach. It parses with
+/// `pico-args`, whose error type has no unknown-argument variant at all, and
+/// it never calls `Arguments::finish()` (checked 0.9.1 through 0.13.0), so the
+/// leftovers holding an unrecognized flag are dropped in silence and there is
+/// no stderr to match. Against a geiger too old for `--output-format` the run
+/// therefore *succeeds* with default non-JSON output and the user sees
+/// "cargo geiger output was not valid JSON". No pattern fixes that — there is
+/// nothing to match on — and no retry fixes it either, because `--format` is a
+/// different flag rather than an alternate spelling. It needs a version probe
+/// or a targeted message. See `run_geiger_json` in `unsafe_code.rs`.
 ///
 /// Every pattern here widens the surface for misreading an unrelated argument
 /// error as "this specific flag is unsupported", so the list stays limited to
-/// wording clap is known to have used.
-const UNKNOWN_FLAG_PATTERNS: [&str; 2] = ["unexpected argument", "found argument"];
+/// wording a parser one of these tools actually uses is known to emit.
+const UNKNOWN_FLAG_PATTERNS: [&str; 3] = [
+    "unexpected argument",
+    "found argument",
+    "unrecognized argument",
+];
 
 /// Checks if stderr indicates an unknown command-line flag.
 ///
 /// A match requires a single line to carry both one of
 /// [`UNKNOWN_FLAG_PATTERNS`] and the flag name, with the flag name appearing
-/// *after* the pattern — the shape of every clap wording, verified by running
-/// clap 2.34, 3.2, and 4.6 against an unrecognized flag.
+/// *after* the pattern — the shape of every wording matched here, verified by
+/// running clap 2.34, 3.2, and 4.6, and `cargo-machete` 0.9.2 (argh), against
+/// an unrecognized flag.
 ///
 /// Both constraints exist for the reason [`is_missing_subcommand`] has them:
 /// the tools this runs on shell out to cargo themselves, so an argument error
@@ -204,9 +221,9 @@ const UNKNOWN_FLAG_PATTERNS: [&str; 2] = ["unexpected argument", "found argument
 /// the flag we asked about. The same-line rule rejects the multi-line form; the
 /// ordering rule rejects the single-line form an error chain flattens into
 /// (`error: --output-format requires metadata: unexpected argument '--x' found`),
-/// where the flag name precedes the pattern. clap's own message can never take
-/// that shape: the parse error is emitted before the tool's own code runs, so
-/// there is nothing to prefix it with.
+/// where the flag name precedes the pattern. Neither parser's own message can
+/// take that shape: the parse error is emitted before the tool's own code runs,
+/// so there is nothing to prefix it with.
 ///
 /// This drives the retry-with-alternate-flags fallback in the `unsafe_code` and
 /// `unused` analyzers, not [`ErrorCode::MissingTool`], so a false positive here
@@ -432,6 +449,48 @@ mod tests {
                      Usage: cargo-machete [OPTIONS]\n";
         assert!(is_unknown_flag(other, "--json"));
         assert!(!is_unknown_flag(other, "--output-format"));
+    }
+
+    /// Pins the error argh emits for an unrecognized flag, as `cargo-machete`
+    /// actually emits it.
+    ///
+    /// The buffer is the verbatim stderr of `cargo machete --json` run against
+    /// a pinned `cargo-machete` 0.9.2 — the latest release — captured with
+    /// `od -c`, not recalled from documentation. It exits 1 with empty stdout,
+    /// so `handle_tool_output` turns it into a hard error unless the retry in
+    /// `unused.rs` fires first.
+    ///
+    /// This is not a legacy-version courtesy. No published `cargo-machete`
+    /// accepts `--json`; the flag exists only on the project's unreleased
+    /// master. Before this pattern existed the analyzer failed outright with
+    /// ``cargo machete failed: Unrecognized argument: --json`` against every
+    /// installable version of the tool.
+    ///
+    /// argh's shape satisfies both structural rules without changing them: the
+    /// flag sits on the pattern's own line and follows it. It also prints no
+    /// options listing — only a `Run --help` line — so the false positive
+    /// `is_unknown_flag_ignores_flags_echoed_in_a_usage_block` guards against
+    /// cannot arise from argh at all.
+    #[test]
+    fn is_unknown_flag_pins_argh_error_wording() {
+        let argh = "Unrecognized argument: --json\n\n\
+                    Run --help for more information.\n";
+        assert!(is_unknown_flag(argh, "--json"));
+
+        // A different flag's rejection is not this flag's rejection. This one
+        // passes on absence — `--with-metadata` is nowhere in the buffer — so
+        // it is a cheap sanity check, not the discrimination test. The
+        // assertion below is the one that discriminates: the flag IS present,
+        // and is rejected only because it precedes the pattern.
+        assert!(!is_unknown_flag(argh, "--with-metadata"));
+
+        // The ordering rule applies to argh's wording too: a flattened error
+        // chain that names our flag before a nested tool's argument error is
+        // not argh rejecting our flag.
+        assert!(!is_unknown_flag(
+            "error: --json requires metadata: Unrecognized argument: --other",
+            "--json"
+        ));
     }
 
     /// A nested argument error must not be read as the outer flag being unknown.

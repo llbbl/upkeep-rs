@@ -514,6 +514,63 @@ mod tests {
         );
     }
 
+    /// The fallback must fire against the wording `cargo-machete` really emits.
+    ///
+    /// The sibling test above uses clap's wording, which no released
+    /// `cargo-machete` can produce — it parses with `argh`. The first buffer
+    /// here is the verbatim stderr of `cargo machete --json` against a pinned
+    /// `cargo-machete` 0.9.2, the latest release, which exits 1 with empty
+    /// stdout.
+    ///
+    /// This is the live path, not a legacy one: no published `cargo-machete`
+    /// accepts `--json` (it exists only on the project's unreleased master),
+    /// so this retry is the only way the analyzer produces output at all
+    /// against an installed tool. Reverting the `unrecognized argument`
+    /// pattern makes this test fail with `ErrorCode::ExternalCommand`,
+    /// "cargo machete failed: Unrecognized argument: --json".
+    #[tokio::test]
+    async fn run_machete_json_with_falls_back_on_argh_unknown_flag() {
+        let outputs = Arc::new(Mutex::new(vec![
+            output_with(
+                1,
+                "",
+                "Unrecognized argument: --json\n\nRun --help for more information.\n",
+            ),
+            output_with(0, "Unused dependencies:\n- serde\n", ""),
+        ]));
+        let calls = Arc::new(Mutex::new(Vec::<Vec<String>>::new()));
+
+        let run_tool = |args: &'static [&'static str],
+                        _: PathBuf|
+         -> Pin<
+            Box<dyn Future<Output = Result<std::process::Output>> + Send + 'static>,
+        > {
+            let outputs = Arc::clone(&outputs);
+            let calls = Arc::clone(&calls);
+            let args_vec = args.iter().map(|arg| (*arg).to_string()).collect();
+            Box::pin(async move {
+                calls.lock().unwrap().push(args_vec);
+                Ok(outputs.lock().unwrap().remove(0))
+            })
+        };
+
+        let output = run_machete_json_with(Path::new("."), run_tool)
+            .await
+            .expect("the argh rejection should trigger the plain-output retry");
+        let stdout = String::from_utf8(output.stdout).expect("stdout");
+        let (unused, _) = parse_machete_output(&stdout).expect("parse");
+        assert_eq!(unused.len(), 1);
+        assert_eq!(unused[0].name, "serde");
+
+        let recorded_calls = calls.lock().unwrap();
+        assert_eq!(
+            recorded_calls.len(),
+            2,
+            "should retry without --json; got calls: {recorded_calls:?}"
+        );
+        assert!(!recorded_calls[1].contains(&"--json".to_string()));
+    }
+
     #[tokio::test]
     async fn run_machete_json_with_missing_tool_returns_error() {
         let outputs = Arc::new(Mutex::new(vec![output_with(
