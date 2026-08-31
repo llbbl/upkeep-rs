@@ -39,30 +39,65 @@ pub async fn run_unsafe() -> Result<UnsafeOutput> {
     })?;
     match parse_geiger_output(&stdout) {
         Ok(output) => Ok(output),
-        Err(parse_err) => {
-            if output.status.success() {
-                return Err(parse_err);
-            }
-
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let stderr_message = stderr.trim();
-            let stdout_message = stdout.trim();
-            let stderr_message = if stderr_message.is_empty() {
-                "<empty>"
-            } else {
-                stderr_message
-            };
-
-            let mut message =
-                format!("cargo geiger failed: stderr: {stderr_message}; parse error: {parse_err}");
-            if !stdout_message.is_empty() {
-                message.push_str(" stdout: ");
-                message.push_str(stdout_message);
-            }
-
-            Err(UpkeepError::message(ErrorCode::ExternalCommand, message))
-        }
+        Err(parse_err) => Err(describe_geiger_failure(
+            parse_err,
+            output.status.success(),
+            &stdout,
+            &String::from_utf8_lossy(&output.stderr),
+        )),
     }
+}
+
+/// Decides what to report when geiger ran but its output could not be parsed.
+///
+/// Split out of [`run_unsafe`] so it can be tested: reaching it through
+/// `run_unsafe` would mean spawning a real cargo, so the whole branch was
+/// previously unreachable from the test module.
+///
+/// A successful exit means the parse failure is the whole story, so the parser's
+/// own error stands. A non-zero exit usually means the parse failure is a
+/// symptom and the exit is the cause, so both are reported together.
+///
+/// **Table output escapes that rule**, because a geiger too old to emit JSON is
+/// the cause regardless of how it exited. It is not a success-only condition:
+/// 0.10.2 exits 1 whenever the scan also emitted warnings —
+/// `WARNING: Dependency file was never scanned` is routine for build scripts
+/// and proc macros — having already printed its table to stdout. Keying the
+/// diagnosis off the exit status would rewrap "your geiger is too old" as a
+/// generic external-command failure, with the entire ASCII table pasted into
+/// the message, for what is one of the likelier ways to hit this.
+///
+/// The escape tests the condition itself rather than the resulting error code.
+/// Those are equivalent today — a banner on stdout always fails
+/// `serde_json::from_str`, so nothing downstream of it can mint a competing
+/// code — but the code is a proxy, and a later `MissingTool` from elsewhere in
+/// the parser would silently lose its stderr context with no test noticing.
+fn describe_geiger_failure(
+    parse_err: UpkeepError,
+    exited_successfully: bool,
+    stdout: &str,
+    stderr: &str,
+) -> UpkeepError {
+    if exited_successfully || looks_like_geiger_table(stdout) {
+        return parse_err;
+    }
+
+    let stderr_message = stderr.trim();
+    let stdout_message = stdout.trim();
+    let stderr_message = if stderr_message.is_empty() {
+        "<empty>"
+    } else {
+        stderr_message
+    };
+
+    let mut message =
+        format!("cargo geiger failed: stderr: {stderr_message}; parse error: {parse_err}");
+    if !stdout_message.is_empty() {
+        message.push_str(" stdout: ");
+        message.push_str(stdout_message);
+    }
+
+    UpkeepError::message(ErrorCode::ExternalCommand, message)
 }
 
 /// Runs `cargo geiger --output-format Json`.
@@ -95,10 +130,12 @@ pub async fn run_unsafe() -> Result<UnsafeOutput> {
 ///   ASCII table. JSON output arrived with `--output-format` in 0.11.0; before
 ///   that geiger could not emit JSON at all.
 ///
-/// A pre-0.11.0 geiger still cannot be handled: the scan succeeds with table
-/// output and `parse_geiger_output` reports "cargo geiger output was not valid
-/// JSON". No retry can fix that, because there is no flag to retry with —
-/// it needs a version probe or a targeted message. Tracked separately.
+/// A pre-0.11.0 geiger still cannot produce JSON at all: the scan runs to
+/// completion — exiting 0, or 1 if it also emitted scan warnings — with table
+/// output on stdout. No retry can fix that, because there is no flag to retry
+/// with. It is instead detected after the fact — see
+/// [`looks_like_geiger_table`] — and reported as a tool that needs upgrading
+/// rather than as malformed output.
 async fn run_geiger_json(workspace_root: &Path) -> Result<std::process::Output> {
     let output = run_cargo_tool(
         &["geiger", "--output-format", GEIGER_JSON_FORMAT],
@@ -112,8 +149,58 @@ async fn run_geiger_json(workspace_root: &Path) -> Result<std::process::Output> 
     })
 }
 
+/// Start of the banner geiger prints above its human-readable table.
+///
+/// Verified verbatim in 0.10.2, 0.11.0 and 0.13.0. Only the prefix is pinned,
+/// and not because the banner changed between versions — it did not. 0.11.0
+/// *added* an `--output-format Ratio` whose banner ends `x/y=z%`, while every
+/// other format, in every version including 0.10.2, ends `x/y`. upkeep never
+/// asks for `Ratio`, so the full line would do; keying on the substring that is
+/// invariant across formats and versions costs nothing and needs no revisiting.
+const GEIGER_TABLE_BANNER: &str = "Metric output format:";
+
+/// The oldest geiger that can emit JSON, i.e. the first with `--output-format`.
+const GEIGER_MIN_JSON_VERSION: &str = "0.11.0";
+
+/// Whether geiger printed its table instead of the JSON we asked for.
+///
+/// Only consulted once JSON parsing has already failed, so a real JSON report
+/// can never reach it — and in 0.11.0+ the JSON path never touches the table
+/// printer at all, so a genuine report cannot carry the banner either way.
+///
+/// Given that, table output means `--output-format` was ignored rather than
+/// honoured. `pico-args` drops unknown flags in silence, so the scan runs to
+/// completion, exiting 0 — or 1 if it also emitted scan warnings. A 0.11.0+
+/// geiger given a value it cannot parse panics instead, leaving stdout empty,
+/// so `handle_tool_output` rejects it before the parser ever runs.
+///
+/// Matched at line start rather than anywhere in the buffer. Nothing realistic
+/// embeds this string mid-line — crate names cannot contain spaces or colons —
+/// but the banner is `println!`ed in every version, so anchoring has no
+/// false-negative risk and removes the need to reconstruct that argument.
+fn looks_like_geiger_table(stdout: &str) -> bool {
+    stdout
+        .lines()
+        .any(|line| line.starts_with(GEIGER_TABLE_BANNER))
+}
+
 fn parse_geiger_output(stdout: &str) -> Result<UnsafeOutput> {
     let value: Value = serde_json::from_str(stdout).map_err(|err| {
+        if looks_like_geiger_table(stdout) {
+            // Not a malformed report — a scan that succeeded in the wrong
+            // format. Saying "output was not valid JSON" blames the tool's
+            // output for what is a version problem, and sends the user looking
+            // at their project instead of their toolchain.
+            return UpkeepError::message(
+                ErrorCode::MissingTool,
+                format!(
+                    "cargo-geiger printed its table output instead of the JSON that was \
+                     requested; JSON output needs cargo-geiger \
+                     {GEIGER_MIN_JSON_VERSION} or later. Upgrade with `{}`.",
+                    GEIGER_CONFIG.install_hint
+                ),
+            );
+        }
         UpkeepError::context(
             ErrorCode::InvalidData,
             "cargo geiger output was not valid JSON",
@@ -373,5 +460,162 @@ mod tests {
         let err = parse_geiger_output(json).unwrap_err();
         assert_eq!(err.code(), ErrorCode::InvalidData);
         assert!(err.to_string().contains("cargo geiger"));
+    }
+
+    /// Abridged stdout from cargo-geiger 0.10.2, which has no `--output-format`.
+    ///
+    /// `pico-args` drops the unknown flag in silence, so the scan runs and
+    /// prints this. The banner is copied verbatim from
+    /// `cargo-geiger-0.10.2/src/cli.rs`, which `println!`s it literally; the
+    /// column header is the content of that file's `UNSAFE_COUNTERS_HEADER`
+    /// joined with a space, checked byte-for-byte against a real capture rather
+    /// than copied from a `println!`. The symbol legend is trimmed to one entry
+    /// and the table to one row, so this is a representative excerpt rather
+    /// than a full capture.
+    const GEIGER_TABLE_STDOUT_PRE_0_11: &str = "\n\
+        Metric output format: x/y\n    \
+        x = unsafe code used by the build\n    \
+        y = total unsafe code found in the crate\n\n\
+        Symbols: \n    \
+        🔒  = No `unsafe` usage found, declares #![forbid(unsafe_code)]\n\n\
+        Functions  Expressions  Impls  Traits  Methods  Dependency\n\n\
+        0/0        0/0          0/0    0/0     0/0      🔒  demo 0.1.0\n";
+
+    /// A geiger too old for JSON is a toolchain problem, not a bad report.
+    ///
+    /// The generic "output was not valid JSON" blamed geiger's output for what
+    /// is a version gap, which sends the user to inspect their project rather
+    /// than upgrade their tool. `MissingTool` also puts it in `quality`'s
+    /// "optional tool needs attention" bucket rather than "the analyzer failed",
+    /// which is the honest bucket: nothing is wrong with the project.
+    #[test]
+    fn parse_geiger_output_reports_a_too_old_geiger_rather_than_bad_json() {
+        let err = parse_geiger_output(GEIGER_TABLE_STDOUT_PRE_0_11).unwrap_err();
+
+        assert_eq!(err.code(), ErrorCode::MissingTool);
+        let message = err.to_string();
+        assert!(
+            message.contains("0.11.0"),
+            "the message must name the version needed, got: {message}"
+        );
+        assert!(
+            message.contains("cargo install cargo-geiger"),
+            "the message must carry the upgrade command, got: {message}"
+        );
+        assert!(
+            !message.contains("not valid JSON"),
+            "the generic JSON complaint is what this replaces, got: {message}"
+        );
+    }
+
+    /// The banner's suffix varies by *output format*, not by version: `Ratio`
+    /// ends `x/y=z%` and everything else ends `x/y`. upkeep never asks for
+    /// `Ratio`, so neither case is one it provokes — but the detector must not
+    /// be keyed to a suffix that only some formats emit.
+    #[test]
+    fn geiger_table_detection_is_not_keyed_to_one_output_format_suffix() {
+        assert!(looks_like_geiger_table("Metric output format: x/y\n"));
+        assert!(looks_like_geiger_table("Metric output format: x/y=z%\n"));
+        // Anchored at line start: the banner is always `println!`ed, so this
+        // costs no true positives and rejects an embedded mention.
+        assert!(!looks_like_geiger_table(
+            "note: see \"Metric output format: x/y\" in the docs\n"
+        ));
+    }
+
+    /// A too-old geiger stays diagnosed even when the scan also exits non-zero.
+    ///
+    /// 0.10.2 exits 1 whenever it emitted scan warnings — routine for build
+    /// scripts and proc macros — having already printed its table. Reporting on
+    /// the exit status alone would rewrap the diagnosis as a generic
+    /// external-command failure and paste the whole table into the message,
+    /// which is the outcome this issue exists to remove.
+    #[test]
+    fn geiger_failure_keeps_the_too_old_diagnosis_on_a_nonzero_exit() {
+        let parse_err = parse_geiger_output(GEIGER_TABLE_STDOUT_PRE_0_11).unwrap_err();
+
+        let described = describe_geiger_failure(
+            parse_err,
+            false,
+            GEIGER_TABLE_STDOUT_PRE_0_11,
+            "WARNING: Dependency file was never scanned: /w/demo/build.rs",
+        );
+
+        assert_eq!(described.code(), ErrorCode::MissingTool);
+        let message = described.to_string();
+        assert!(
+            message.contains("0.11.0"),
+            "the upgrade advice must survive, got: {message}"
+        );
+        assert!(
+            !message.contains("Metric output format"),
+            "the table must not be pasted into the message, got: {message}"
+        );
+    }
+
+    /// An ordinary parse failure on a non-zero exit still reports both halves.
+    ///
+    /// Asserts the whole message rather than a pair of `contains` checks. This
+    /// is the only guard on [`describe_geiger_failure`] being a faithful
+    /// extraction of the branch it replaced, and a `contains` pair waves through
+    /// every mutation that matters: dropping the stdout section, reordering the
+    /// halves, or swapping the two adjacent `&str` parameters. Distinct
+    /// sentinels are what make that last one visible — verified by swapping
+    /// them, which reddens this and its sibling.
+    ///
+    /// It does **not** guard the call site's argument order: this calls the
+    /// function directly, so transposing the arguments in `run_unsafe` leaves
+    /// every test green. Reaching that wiring means spawning a real cargo, so
+    /// nothing here covers it. Checked by hand at the one call site.
+    ///
+    /// Exact equality is safe because `UpkeepError`'s `Display` is
+    /// `#[error("{message}")]` for both variants, so no source chain leaks in.
+    #[test]
+    fn geiger_failure_on_a_nonzero_exit_still_reports_stderr_and_parse_error() {
+        let parse_err = parse_geiger_output("{").unwrap_err();
+        let parse_text = parse_err.to_string();
+
+        let described = describe_geiger_failure(parse_err, false, "STDOUT_HERE", "STDERR_HERE");
+
+        assert_eq!(described.code(), ErrorCode::ExternalCommand);
+        assert_eq!(
+            described.to_string(),
+            format!(
+                "cargo geiger failed: stderr: STDERR_HERE; parse error: {parse_text} \
+                 stdout: STDOUT_HERE"
+            ),
+        );
+    }
+
+    /// Empty streams are labelled, not left as gaps after their label.
+    ///
+    /// Whitespace-only stderr becomes `<empty>` and whitespace-only stdout is
+    /// omitted entirely rather than appended as a bare `stdout: `. Nothing else
+    /// in the crate exercises either branch.
+    #[test]
+    fn geiger_failure_labels_empty_streams_rather_than_leaving_gaps() {
+        let parse_err = parse_geiger_output("{").unwrap_err();
+        let parse_text = parse_err.to_string();
+
+        let described = describe_geiger_failure(parse_err, false, "   \n", "  \n ");
+
+        assert_eq!(
+            described.to_string(),
+            format!("cargo geiger failed: stderr: <empty>; parse error: {parse_text}"),
+        );
+    }
+
+    /// Malformed JSON is still malformed JSON.
+    ///
+    /// Without this, widening the detector to something like "contains
+    /// `format`" would silently relabel every parse failure as an outdated
+    /// tool, which is a worse error than the one being replaced.
+    #[test]
+    fn parse_geiger_output_still_reports_genuinely_broken_json() {
+        let err = parse_geiger_output("{\"packages\": [").unwrap_err();
+
+        assert_eq!(err.code(), ErrorCode::InvalidData);
+        assert!(err.to_string().contains("not valid JSON"));
+        assert!(!looks_like_geiger_table("{\"packages\": ["));
     }
 }

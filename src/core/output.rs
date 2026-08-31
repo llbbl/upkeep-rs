@@ -215,8 +215,10 @@ pub struct UnavailableMetric {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum UnavailableReason {
-    /// The analyzer's external tool is not installed. Actionable by the user,
-    /// and not a sign of anything wrong with the project.
+    /// The analyzer's external tool is not installed, or is installed but too
+    /// old to produce output this crate can read. Actionable by the user — in
+    /// both cases by running the tool's install command — and not a sign of
+    /// anything wrong with the project.
     NotInstalled,
     /// The analyzer ran but failed. Something is genuinely broken.
     Failed,
