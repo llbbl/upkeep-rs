@@ -1,6 +1,6 @@
 ---
 name: upkeep-rs-audit
-version: 0.3.11
+version: 0.3.12
 description: Scan for RustSec advisories and guide remediation
 allowed-tools: Bash, Read, Grep, Glob, Edit
 ---
