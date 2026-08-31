@@ -254,3 +254,40 @@ fn deps_keeps_private_path_dependency_off_registry_lookup_queue() {
     assert_eq!(json["skipped_packages"][0]["name"], "private-path");
     assert_eq!(json["skipped_packages"][0]["reason"], "non_registry");
 }
+
+#[test]
+fn deps_keeps_alias_collisions_separate_across_dependency_kinds() {
+    let temp_dir = tempfile::tempdir().expect("temp dir");
+    let root = temp_dir.path();
+    fs::create_dir_all(root.join("src")).expect("create src");
+    fs::write(
+        root.join("Cargo.toml"),
+        "[package]\nname = \"alias-kind-collision\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n\
+         [dependencies]\nryu = \"=0.2.8\"\n\n\
+         [dev-dependencies]\nryu = { package = \"itoa\", version = \"=1.0.0\" }\n",
+    )
+    .expect("write Cargo.toml");
+    fs::write(root.join("src").join("main.rs"), "fn main() {}\n").expect("write main.rs");
+
+    let Some(json) = run_deps_json(root) else {
+        return;
+    };
+    let packages = json["packages"].as_array().expect("packages array");
+    let ryu = packages
+        .iter()
+        .find(|package| package["name"] == "ryu")
+        .expect("outdated ryu entry");
+    let itoa = packages
+        .iter()
+        .find(|package| package["name"] == "itoa")
+        .expect("outdated itoa entry");
+
+    assert_eq!(ryu["current"], "0.2.8");
+    assert_eq!(ryu["dependency_type"], "normal");
+    assert_eq!(ryu["members"], serde_json::json!(["alias-kind-collision"]));
+
+    assert_eq!(itoa["alias"], "ryu");
+    assert_eq!(itoa["current"], "1.0.0");
+    assert_eq!(itoa["dependency_type"], "dev");
+    assert_eq!(itoa["members"], serde_json::json!(["alias-kind-collision"]));
+}
