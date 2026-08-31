@@ -187,23 +187,29 @@ struct MemberVersions {
     /// dependency). Cargo permits the same name in different dependency sections, so
     /// the kind is required to keep those graph edges distinct.
     by_dep_name: HashMap<(String, DependencyType), Version>,
-    /// Keyed by the real package name (`serde-json`). Manifest dependency names use
-    /// the package name, which differs from the lib target name whenever the crate
-    /// name contains a dash.
+    /// Keyed by the real package name (`serde-json`) and dependency kind. Manifest
+    /// dependency names use the package name, which differs from the lib target name
+    /// whenever the crate name contains a dash.
+    ///
+    /// The kind is part of the key for the same reason it is in `by_dep_name`: a
+    /// package can reach one version through `[dependencies]` and another through
+    /// `[dev-dependencies]`, and each kind then has exactly one answer. Keying by
+    /// name alone would let those two instances poison each other and refuse a
+    /// lookup that is unambiguous within the kind the edge was declared in.
     ///
     /// Cargo emits `node.deps` in package-id order, which says nothing about whether
     /// an edge was renamed, so when one package name has several resolved instances
-    /// no writer here is more authoritative than another. This map is therefore only
-    /// a last-resort fallback in [`resolve_current_version`], reached after both
-    /// `by_dep_name` lookups miss; a renamed edge never consults it at all.
+    /// *in one kind* no writer here is more authoritative than another. This map is
+    /// therefore only a last-resort fallback in [`resolve_current_version`], reached
+    /// after both `by_dep_name` lookups miss; a renamed edge never consults it at all.
     ///
     /// `None` is a *poisoned* entry: the package name resolved to more than one
-    /// distinct version in this member, so no lookup through it can say which
-    /// instance an edge meant. Poisoning makes that ambiguity fail closed — the
-    /// edge is reported as [`SkipReason::AmbiguousResolve`] rather than handed a
+    /// distinct version within that kind in this member, so no lookup through it can
+    /// say which instance an edge meant. Poisoning makes that ambiguity fail closed —
+    /// the edge is reported as [`SkipReason::AmbiguousResolve`] rather than handed a
     /// coin-flip version that could pair an impossible `current` with the edge's
     /// own `required`.
-    by_package_name: HashMap<String, Option<Version>>,
+    by_package_name: HashMap<(String, DependencyType), Option<Version>>,
 }
 
 impl MemberVersions {
@@ -221,21 +227,37 @@ impl MemberVersions {
         self.by_dep_name.get(&(name.to_string(), dependency_type))
     }
 
-    /// Records one resolved instance under its real package name.
+    /// Records one resolved instance under its real package name and kind.
     ///
     /// The same version arriving twice is not ambiguity and must not poison the
-    /// entry. Ordinary manifests cannot produce that repeat — cargo rejects one
-    /// package depended on twice under different names ("depends on crate ...
-    /// multiple times with different names"), and rejects two package ids sharing
-    /// a name and version ("package collision in the lockfile"). The equal-version
-    /// arm is defensive: `-Zbindeps` artifact dependencies can put one package id
-    /// in `node.deps` more than once, and tolerating a repeat costs nothing.
+    /// entry, and the equal-version arm below is **load-bearing on ordinary
+    /// manifests**, not merely defensive.
     ///
-    /// A *second distinct* version poisons permanently: once poisoned, no later
-    /// insert can un-poison it, because a third instance agreeing with one of the
-    /// first two still leaves the name pointing at more than one version.
-    fn insert_package_version(&mut self, name: impl Into<String>, version: Version) {
-        match self.by_package_name.entry(name.into()) {
+    /// One `node.deps` edge carries a `DepKindInfo` per (kind, target) pair, so
+    /// several entries can share a kind — one per `cfg` target. A crate in
+    /// `[dev-dependencies]` plus two `cfg`-gated dev sections yields three `Dev`
+    /// entries on a single edge, and [`build_resolved_versions`] writes this map
+    /// once per entry. Without the equal-version arm every `cfg`-multiplexed
+    /// dependency would poison itself. `-Zbindeps` artifact dependencies can
+    /// likewise put one package id in `node.deps` more than once.
+    ///
+    /// Two *different* versions under one name is the case this map exists to
+    /// catch, and cargo does permit it across kinds — what cargo rejects is one
+    /// package depended on twice under different names ("depends on crate ...
+    /// multiple times with different names") or two package ids sharing a name
+    /// and version ("package collision in the lockfile").
+    ///
+    /// A *second distinct* version poisons that `(name, kind)` pair permanently:
+    /// once poisoned, no later insert can un-poison it, because a third instance
+    /// agreeing with one of the first two still leaves the pair pointing at more
+    /// than one version. Another kind's entry is untouched.
+    fn insert_package_version(
+        &mut self,
+        name: impl Into<String>,
+        dependency_type: DependencyType,
+        version: Version,
+    ) {
+        match self.by_package_name.entry((name.into(), dependency_type)) {
             Entry::Vacant(slot) => {
                 slot.insert(Some(version));
             }
@@ -247,15 +269,23 @@ impl MemberVersions {
         }
     }
 
-    /// The unique version resolved for a package name, or [`None`] when the name is
-    /// absent *or* poisoned. [`Self::is_ambiguous_package_name`] separates the two.
-    fn package_version(&self, name: &str) -> Option<&Version> {
-        self.by_package_name.get(name).and_then(Option::as_ref)
+    /// The unique version resolved for a package name in one dependency kind, or
+    /// [`None`] when the pair is absent *or* poisoned.
+    /// [`Self::is_ambiguous_package_name`] separates the two.
+    fn package_version(&self, name: &str, dependency_type: DependencyType) -> Option<&Version> {
+        self.by_package_name
+            .get(&(name.to_string(), dependency_type))
+            .and_then(Option::as_ref)
     }
 
-    /// Whether `name` resolved to several distinct versions in this member.
-    fn is_ambiguous_package_name(&self, name: &str) -> bool {
-        matches!(self.by_package_name.get(name), Some(None))
+    /// Whether `name` resolved to several distinct versions within `dependency_type`
+    /// in this member.
+    fn is_ambiguous_package_name(&self, name: &str, dependency_type: DependencyType) -> bool {
+        matches!(
+            self.by_package_name
+                .get(&(name.to_string(), dependency_type)),
+            Some(None)
+        )
     }
 }
 
@@ -277,23 +307,33 @@ fn build_resolved_versions(
             };
             for dep in &node.deps {
                 if let Some(package) = packages_by_id.get(&dep.pkg) {
-                    if dep.dep_kinds.is_empty() {
+                    // Both maps are keyed by dependency kind, so both must agree about
+                    // which kinds this edge contributes: `resolve_current_version` looks
+                    // an edge up in one and `resolve_dependencies` asks the other whether
+                    // that name was ambiguous, and if the two were populated from
+                    // different worlds the ambiguity report would describe a lookup that
+                    // never happened. Deriving the kind list once, here, is what keeps
+                    // them in step — including the fallback for an edge with no
+                    // `dep_kinds` at all (cargo omits the field on old metadata formats),
+                    // which counts as a single normal dependency for both maps.
+                    let kinds = dep
+                        .dep_kinds
+                        .iter()
+                        .map(|dep_kind| convert_dependency_kind(dep_kind.kind))
+                        .chain(dep.dep_kinds.is_empty().then_some(DependencyType::Normal));
+
+                    for kind in kinds {
                         versions.insert_dep_version(
                             dep.name.to_string(),
-                            DependencyType::Normal,
+                            kind,
                             package.version.clone(),
                         );
-                    } else {
-                        for dep_kind in &dep.dep_kinds {
-                            versions.insert_dep_version(
-                                dep.name.to_string(),
-                                convert_dependency_kind(dep_kind.kind),
-                                package.version.clone(),
-                            );
-                        }
+                        versions.insert_package_version(
+                            package.name.to_string(),
+                            kind,
+                            package.version.clone(),
+                        );
                     }
-                    versions
-                        .insert_package_version(package.name.to_string(), package.version.clone());
                 }
             }
             versions
@@ -548,15 +588,16 @@ fn resolve_dependencies(
             // Only reachable once every lookup in `resolve_current_version` missed,
             // so this mirrors that function's chain rather than re-guessing it: a
             // renamed edge never consults `by_package_name`, and the raw `edge.name`
-            // used here is the same key the fallback used, with no dash substitution
-            // on either side.
+            // plus this edge's own dependency kind are the same key the fallback used,
+            // with no dash substitution on either side.
             //
             // It is not an exact test for *why* the edge failed. An edge that was
             // never in the resolve graph at all — an inactive optional, or one for a
             // foreign target — whose package name happens to be poisoned by two
             // unrelated instances is also reported here. That is deliberate; see
             // `unresolved_skip` for why the fail-closed reason wins.
-            let ambiguous = edge.alias.is_none() && versions.is_ambiguous_package_name(&edge.name);
+            let ambiguous = edge.alias.is_none()
+                && versions.is_ambiguous_package_name(&edge.name, edge.dependency_type);
             skipped.push(unresolved_skip(&edge, ambiguous));
             continue;
         };
@@ -813,10 +854,13 @@ fn resolve_current_version(
         // name, which is the package name with dashes replaced (`pretty-assertions`
         // -> `pretty_assertions`).
         .or_else(|| versions.dep_version(&dep_name.replace('-', "_"), dependency_type))
-        // Last resort: a crate with a custom `[lib] name` matching neither. A
-        // poisoned entry misses here, which is what turns an ambiguous package name
-        // into a skip instead of an arbitrary instance's version.
-        .or_else(|| versions.package_version(dep_name))
+        // Last resort: a crate with a custom `[lib] name` matching neither. Keyed by
+        // this edge's own kind, so a package reaching one version through
+        // `[dependencies]` and another through `[dev-dependencies]` still answers each
+        // edge from its own section. A poisoned entry misses here, which is what turns
+        // a package name that is ambiguous *within this kind* into a skip instead of
+        // an arbitrary instance's version.
+        .or_else(|| versions.package_version(dep_name, dependency_type))
         .cloned()
 }
 
@@ -995,8 +1039,8 @@ mod tests {
     ///
     /// `by_dep_name` is keyed by the lib target name (the package name with dashes
     /// replaced by underscores) plus dependency kind; `by_package_name` is keyed by
-    /// the real package name. The name shapes diverge exactly when the crate name
-    /// contains a dash. Writing the *same* name into both maps — as this fixture used
+    /// the real package name plus the same kind. The name shapes diverge exactly when
+    /// the crate name contains a dash. Writing the *same* name into both maps — as this fixture used
     /// to — makes every lookup path in `resolve_current_version` look interchangeable,
     /// which is how an incorrect fallback chain passed the whole unit suite.
     ///
@@ -1013,18 +1057,25 @@ mod tests {
                 DependencyType::Normal,
                 parsed.clone(),
             );
-            versions.insert_package_version(*name, parsed);
+            versions.insert_package_version(*name, DependencyType::Normal, parsed);
         }
         versions
     }
 
     /// Register a renamed edge's resolve-graph entry: cargo keys it by the rename and
     /// by nothing else, so it deliberately touches neither `by_package_name` nor the
-    /// package's lib target name.
-    fn insert_renamed(versions: &mut MemberVersions, rename: &str, version: &str) {
+    /// package's lib target name. A caller that also wants the instance visible to the
+    /// package-name fallback registers that separately, under the kind the rename was
+    /// declared in.
+    fn insert_renamed(
+        versions: &mut MemberVersions,
+        rename: &str,
+        dependency_type: DependencyType,
+        version: &str,
+    ) {
         versions.insert_dep_version(
             rename.to_string(),
-            DependencyType::Normal,
+            dependency_type,
             Version::parse(version).expect("parse version"),
         );
     }
@@ -1111,7 +1162,7 @@ mod tests {
             ..MemberVersions::default()
         };
         versions.insert_dep_version("name", DependencyType::Normal, Version::new(1, 4, 2));
-        versions.insert_package_version("name", Version::new(1, 4, 2));
+        versions.insert_package_version("name", DependencyType::Normal, Version::new(1, 4, 2));
 
         assert_eq!(
             resolve_current_version(Some("alias"), "name", DependencyType::Normal, &versions),
@@ -1167,7 +1218,7 @@ mod tests {
             DependencyType::Normal,
             Version::new(1, 4, 0),
         );
-        versions.insert_package_version("odd-crate", Version::new(1, 4, 0));
+        versions.insert_package_version("odd-crate", DependencyType::Normal, Version::new(1, 4, 0));
 
         let resolved =
             resolve_current_version(None, "odd-crate", DependencyType::Normal, &versions);
@@ -1181,37 +1232,103 @@ mod tests {
             ..MemberVersions::default()
         };
 
-        versions.insert_package_version("wasm-bindgen", Version::new(0, 2, 100));
+        versions.insert_package_version(
+            "wasm-bindgen",
+            DependencyType::Normal,
+            Version::new(0, 2, 100),
+        );
         assert_eq!(
-            versions.package_version("wasm-bindgen"),
+            versions.package_version("wasm-bindgen", DependencyType::Normal),
             Some(&Version::new(0, 2, 100))
         );
-        assert!(!versions.is_ambiguous_package_name("wasm-bindgen"));
+        assert!(!versions.is_ambiguous_package_name("wasm-bindgen", DependencyType::Normal));
 
         // The same version arriving again is not ambiguity and must not poison: cargo
         // emits one node dep per edge, so a package reached under both a rename and its
         // own name shows up twice at one version.
-        versions.insert_package_version("wasm-bindgen", Version::new(0, 2, 100));
+        versions.insert_package_version(
+            "wasm-bindgen",
+            DependencyType::Normal,
+            Version::new(0, 2, 100),
+        );
         assert_eq!(
-            versions.package_version("wasm-bindgen"),
+            versions.package_version("wasm-bindgen", DependencyType::Normal),
             Some(&Version::new(0, 2, 100)),
             "a repeated identical version must not poison the entry"
         );
 
-        versions.insert_package_version("wasm-bindgen", Version::new(0, 1, 0));
-        assert!(versions.is_ambiguous_package_name("wasm-bindgen"));
-        assert_eq!(versions.package_version("wasm-bindgen"), None);
+        versions.insert_package_version(
+            "wasm-bindgen",
+            DependencyType::Normal,
+            Version::new(0, 1, 0),
+        );
+        assert!(versions.is_ambiguous_package_name("wasm-bindgen", DependencyType::Normal));
+        assert_eq!(
+            versions.package_version("wasm-bindgen", DependencyType::Normal),
+            None
+        );
 
         // Poisoning is permanent: a third instance agreeing with one of the first two
         // still leaves the name pointing at more than one version.
-        versions.insert_package_version("wasm-bindgen", Version::new(0, 2, 100));
-        assert!(versions.is_ambiguous_package_name("wasm-bindgen"));
+        versions.insert_package_version(
+            "wasm-bindgen",
+            DependencyType::Normal,
+            Version::new(0, 2, 100),
+        );
+        assert!(versions.is_ambiguous_package_name("wasm-bindgen", DependencyType::Normal));
 
         // Poisoning is per package name, not global.
-        versions.insert_package_version("serde", Version::new(1, 0, 200));
+        versions.insert_package_version("serde", DependencyType::Normal, Version::new(1, 0, 200));
         assert_eq!(
-            versions.package_version("serde"),
+            versions.package_version("serde", DependencyType::Normal),
             Some(&Version::new(1, 0, 200))
+        );
+    }
+
+    #[test]
+    fn insert_package_version_poisons_within_a_kind_not_across_kinds() {
+        // `wasm-bindgen = "=0.2.100"` in `[dependencies]` alongside
+        // `wb1 = { package = "wasm-bindgen", version = "0.1" }` in `[dev-dependencies]`:
+        // one package name, two resolved instances, but each *kind* has exactly one
+        // answer. Keying by name alone made these two poison each other.
+        let mut versions = MemberVersions {
+            member: "member".to_string(),
+            ..MemberVersions::default()
+        };
+
+        versions.insert_package_version(
+            "wasm-bindgen",
+            DependencyType::Normal,
+            Version::parse("0.2.100").expect("parse"),
+        );
+        versions.insert_package_version("wasm-bindgen", DependencyType::Dev, Version::new(0, 1, 0));
+
+        assert_eq!(
+            versions.package_version("wasm-bindgen", DependencyType::Normal),
+            Some(&Version::parse("0.2.100").expect("parse")),
+            "a dev-kind instance must not poison the normal-kind entry"
+        );
+        assert_eq!(
+            versions.package_version("wasm-bindgen", DependencyType::Dev),
+            Some(&Version::new(0, 1, 0))
+        );
+        assert!(!versions.is_ambiguous_package_name("wasm-bindgen", DependencyType::Normal));
+        assert!(!versions.is_ambiguous_package_name("wasm-bindgen", DependencyType::Dev));
+
+        // Ambiguity *within* one kind must still poison — that is #23's behaviour and
+        // this key change must not weaken it. Only the kind that saw two distinct
+        // versions is affected.
+        versions.insert_package_version("wasm-bindgen", DependencyType::Dev, Version::new(0, 3, 0));
+        assert!(versions.is_ambiguous_package_name("wasm-bindgen", DependencyType::Dev));
+        assert_eq!(
+            versions.package_version("wasm-bindgen", DependencyType::Dev),
+            None
+        );
+        assert!(!versions.is_ambiguous_package_name("wasm-bindgen", DependencyType::Normal));
+        assert_eq!(
+            versions.package_version("wasm-bindgen", DependencyType::Normal),
+            Some(&Version::parse("0.2.100").expect("parse")),
+            "poisoning the dev kind must leave the normal kind resolvable"
         );
     }
 
@@ -1225,9 +1342,17 @@ mod tests {
             ..MemberVersions::default()
         };
         versions.insert_dep_version("wb_lib", DependencyType::Normal, Version::new(0, 2, 100));
-        insert_renamed(&mut versions, "wb1", "0.1.0");
-        versions.insert_package_version("wasm-bindgen", Version::new(0, 1, 0));
-        versions.insert_package_version("wasm-bindgen", Version::new(0, 2, 100));
+        insert_renamed(&mut versions, "wb1", DependencyType::Normal, "0.1.0");
+        versions.insert_package_version(
+            "wasm-bindgen",
+            DependencyType::Normal,
+            Version::new(0, 1, 0),
+        );
+        versions.insert_package_version(
+            "wasm-bindgen",
+            DependencyType::Normal,
+            Version::new(0, 2, 100),
+        );
 
         assert_eq!(
             resolve_current_version(None, "wasm-bindgen", DependencyType::Normal, &versions),
@@ -1359,7 +1484,7 @@ mod tests {
         };
         versions.insert_dep_version("rand", DependencyType::Normal, Version::new(0, 8, 5));
         versions.insert_dep_version("rand9", DependencyType::Normal, Version::new(0, 9, 2));
-        versions.insert_package_version("rand", Version::new(0, 8, 5));
+        versions.insert_package_version("rand", DependencyType::Normal, Version::new(0, 8, 5));
 
         let mut renamed = edge("rand", "^0.9", 0);
         renamed.alias = Some("rand9".to_string());
@@ -1394,11 +1519,15 @@ mod tests {
             DependencyType::Normal,
             Version::parse("0.2.100").expect("parse"),
         );
-        insert_renamed(&mut versions, "wb1", "0.1.0");
+        insert_renamed(&mut versions, "wb1", DependencyType::Normal, "0.1.0");
         // Only the aliased instance is registered under the package name, which is the
         // hostile shape for this test: the plain edge must find its own 0.2.100 via the
         // lib target name without ever consulting the fallback.
-        versions.insert_package_version("wasm-bindgen", Version::new(0, 1, 0));
+        versions.insert_package_version(
+            "wasm-bindgen",
+            DependencyType::Normal,
+            Version::new(0, 1, 0),
+        );
 
         let edges = vec![
             edge("wasm-bindgen", "=0.2.100", 0),
@@ -1444,12 +1573,20 @@ mod tests {
             DependencyType::Normal,
             Version::parse("0.2.100").expect("parse"),
         );
-        insert_renamed(&mut versions, "wb1", "0.1.0");
+        insert_renamed(&mut versions, "wb1", DependencyType::Normal, "0.1.0");
         // Both instances are the same package, so both land under the one package name.
         // The aliased 0.1.0 is written first, which is the ordering that used to decide
         // the plain edge's answer.
-        versions.insert_package_version("wasm-bindgen", Version::new(0, 1, 0));
-        versions.insert_package_version("wasm-bindgen", Version::parse("0.2.100").expect("parse"));
+        versions.insert_package_version(
+            "wasm-bindgen",
+            DependencyType::Normal,
+            Version::new(0, 1, 0),
+        );
+        versions.insert_package_version(
+            "wasm-bindgen",
+            DependencyType::Normal,
+            Version::parse("0.2.100").expect("parse"),
+        );
 
         let edges = vec![
             edge("wasm-bindgen", "=0.2.100", 0),
@@ -1480,6 +1617,65 @@ mod tests {
     }
 
     #[test]
+    fn resolve_dependencies_resolves_one_package_name_per_dependency_kind() {
+        // Issue #52. Same shape as the test above — the custom `[lib] name` is the only
+        // shape that reaches the package-name fallback — but the two instances sit in
+        // different sections:
+        //
+        //   [dependencies]     wasm-bindgen = "=0.2.100"  # [lib] name = "wb_lib"
+        //   [dev-dependencies] wb1 = { package = "wasm-bindgen", version = "0.1" }
+        //
+        // Both instances are the same package, so both write the package name; but each
+        // *kind* has exactly one answer for it. While the map was keyed by name alone
+        // they poisoned each other, and the plain edge — unambiguous within
+        // `[dependencies]` — was skipped as `ambiguous_resolve` instead of resolving to
+        // its own 0.2.100.
+        let mut versions = MemberVersions {
+            member: "solo".to_string(),
+            ..MemberVersions::default()
+        };
+        versions.insert_dep_version(
+            "wb_lib",
+            DependencyType::Normal,
+            Version::parse("0.2.100").expect("parse"),
+        );
+        // The dev-kind aliased instance is registered first, matching the package-id
+        // ordering that decides a first-writer-wins map's answer.
+        insert_renamed(&mut versions, "wb1", DependencyType::Dev, "0.1.0");
+        versions.insert_package_version("wasm-bindgen", DependencyType::Dev, Version::new(0, 1, 0));
+        versions.insert_package_version(
+            "wasm-bindgen",
+            DependencyType::Normal,
+            Version::parse("0.2.100").expect("parse"),
+        );
+
+        let dev_alias = DependencyEdge {
+            dependency_type: DependencyType::Dev,
+            ..aliased_edge("wasm-bindgen", "wb1", "^0.1", 0)
+        };
+        let edges = vec![edge("wasm-bindgen", "=0.2.100", 0), dev_alias];
+
+        let mut skipped = SkippedCollector::new();
+        let resolved = resolve_dependencies(edges, &[versions], &mut skipped);
+
+        assert!(
+            skipped.into_vec().is_empty(),
+            "neither edge is ambiguous within its own dependency kind"
+        );
+        assert_eq!(resolved.len(), 2, "the two instances must not collapse");
+        assert_eq!(resolved[0].current, Version::new(0, 1, 0));
+        assert_eq!(resolved[0].alias, Some("wb1".to_string()));
+        assert_eq!(resolved[0].dependency_type, DependencyType::Dev);
+        assert_eq!(
+            resolved[1].current,
+            Version::parse("0.2.100").expect("parse")
+        );
+        assert_eq!(resolved[1].alias, None);
+        assert_eq!(resolved[1].required, "=0.2.100");
+        assert_eq!(resolved[1].dependency_type, DependencyType::Normal);
+    }
+
+    #[test]
     fn resolve_dependencies_prefers_ambiguity_over_optional_for_a_poisoned_name() {
         // An optional edge that is genuinely ambiguous must not be filed as
         // `optional_not_activated`: that reason is "not applicable" and would credit the
@@ -1493,9 +1689,17 @@ mod tests {
             DependencyType::Normal,
             Version::parse("0.2.100").expect("parse"),
         );
-        insert_renamed(&mut versions, "wb1", "0.1.0");
-        versions.insert_package_version("wasm-bindgen", Version::new(0, 1, 0));
-        versions.insert_package_version("wasm-bindgen", Version::parse("0.2.100").expect("parse"));
+        insert_renamed(&mut versions, "wb1", DependencyType::Normal, "0.1.0");
+        versions.insert_package_version(
+            "wasm-bindgen",
+            DependencyType::Normal,
+            Version::new(0, 1, 0),
+        );
+        versions.insert_package_version(
+            "wasm-bindgen",
+            DependencyType::Normal,
+            Version::parse("0.2.100").expect("parse"),
+        );
 
         let optional = DependencyEdge {
             optional: true,
