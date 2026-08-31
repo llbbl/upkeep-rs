@@ -19,21 +19,24 @@ Trigger: User asks about security vulnerabilities or wants to audit dependencies
 Goal: Identify RustSec advisories, explain impact, and guide remediation safely.
 
 ## Workflow
-1. Run `cargo upkeep audit` to scan for vulnerabilities.
-2. For each vulnerability:
+1. Run `cargo upkeep audit` to scan for vulnerabilities, informational advisories, and yanked resolved crates.
+2. Treat `vulnerabilities` and `warnings` separately. Warnings are not vulnerabilities and do not affect the vulnerability summary or quality grade.
+3. For each vulnerability:
    - Explain the issue in plain terms and affected versions.
    - Check for patched versions.
    - If patch exists, guide upgrade steps.
    - If no patch, suggest mitigations or alternatives.
-3. Provide RustSec advisory links for each finding.
-4. Create a security fix branch and commit changes.
-5. Open a PR with vulnerability details.
+4. For each warning, report its kind, package/version, dependency path, and advisory details when present. Do not invent an advisory or patched version for `yanked` warnings.
+5. Provide RustSec advisory links for advisory-backed findings.
+6. Create a security fix branch and commit changes.
+7. Open a PR with vulnerability and warning details clearly separated.
 
 ## Severity Handling
 - Critical: Immediate action required, prioritize fix now.
 - High: Fix soon, schedule promptly.
 - Moderate: Plan to fix in the next cycle.
-- Low: Informational, track for later.
+- Low: Vulnerability with low severity; prioritize according to impact.
+- Notice, unmaintained, unsound, or yanked: warning, not vulnerability; investigate remediation without assigning a vulnerability severity.
 
 ## Git Workflow
 - Branch: `security/<advisory-id>` or `security/<crate>`.

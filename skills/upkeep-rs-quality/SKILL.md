@@ -33,6 +33,8 @@ Goal: Generate a health report, explain the grade, and produce a prioritized act
    - MSRV: add `rust-version` under `[package]`, or under `[workspace.package]` for a virtual workspace.
    - Unused deps: remove with `cargo-machete`.
    - Unsafe code: audit and document safety invariants.
+   The Security metric is vulnerability-only. Informational and yanked warnings
+   from standalone `cargo upkeep audit` do not affect this grade.
 5. Compare with previous runs when available — but only compare `score` between
    runs with the same `measured_weight`, since it is renormalized (see below).
 6. Celebrate improvements and highlight regressions.

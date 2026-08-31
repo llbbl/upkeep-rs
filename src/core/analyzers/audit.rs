@@ -1,14 +1,19 @@
 use cargo_metadata::{Metadata, MetadataCommand, PackageId};
-use rustsec::advisory::Severity as RustsecSeverity;
+use rustsec::advisory::{Informational, Severity as RustsecSeverity};
 use rustsec::database::Database;
+use rustsec::package::Package as RustsecPackage;
+use rustsec::registry::CachedIndex;
 use rustsec::report::{Report, Settings};
-use rustsec::Lockfile;
+use rustsec::{Lockfile, WarningKind as RustsecWarningKind};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::ffi::OsString;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use crate::core::error::{ErrorCode, Result, UpkeepError};
-use crate::core::output::{AuditOutput, AuditSummary, Severity, Vulnerability};
+use crate::core::output::{
+    AuditOutput, AuditSummary, AuditWarning, AuditWarningKind, Severity, Vulnerability,
+};
 
 /// Names a local RustSec advisory-database checkout to read instead of fetching.
 ///
@@ -25,12 +30,30 @@ use crate::core::output::{AuditOutput, AuditSummary, Severity, Vulnerability};
 /// non-rustsec git client touching the repo, fails the audit immediately, because
 /// `gix` makes a single attempt with no retry or backoff.
 ///
-/// Set, the database is read from that path and nothing is fetched. The
-/// integration tests use it to stay off the shared cache entirely; an offline or
-/// air-gapped run can point it at a checkout it manages itself.
+/// Set, the advisory database is read from that path and no advisory data is
+/// fetched. Standalone `audit` still refreshes the crates.io index when it has
+/// resolved registry packages to check for yanks; vulnerability-only callers do
+/// not. Tests use this variable to stay off the shared advisory cache entirely.
 pub const ADVISORY_DB_ENV: &str = "UPKEEP_ADVISORY_DB";
 
+/// Match RustSec's advisory-database lock timeout for Cargo's package-cache
+/// lock, which `CachedIndex` holds while it checks yanked versions.
+const REGISTRY_LOCK_TIMEOUT: Duration = Duration::from_secs(300);
+
 pub fn run_audit() -> Result<AuditOutput> {
+    run_audit_with_warnings(true)
+}
+
+/// Run only the vulnerability portion of the audit for callers whose public
+/// contract is vulnerability-based (`quality` and `deps --security`).
+///
+/// Informational and yanked warnings must not make those callers unavailable
+/// or alter their score when the crates.io index cannot be reached.
+pub fn run_vulnerability_audit() -> Result<AuditOutput> {
+    run_audit_with_warnings(false)
+}
+
+fn run_audit_with_warnings(include_warnings: bool) -> Result<AuditOutput> {
     let metadata = MetadataCommand::new().exec().map_err(|err| {
         UpkeepError::context(ErrorCode::Metadata, "failed to load cargo metadata", err)
     })?;
@@ -46,7 +69,11 @@ pub fn run_audit() -> Result<AuditOutput> {
     })?;
 
     let db = load_database()?;
-    let settings = Settings::default();
+    let settings = if include_warnings {
+        audit_settings()
+    } else {
+        Settings::default()
+    };
     let report = Report::generate(&db, &lockfile, &settings);
 
     let graph = DependencyGraph::build(&metadata)?;
@@ -81,11 +108,165 @@ pub fn run_audit() -> Result<AuditOutput> {
         });
     }
 
+    let warnings = if include_warnings {
+        let mut warnings = map_informational_warnings(&report, &graph);
+        warnings.extend(find_yanked_warnings(&lockfile, &graph)?);
+        sort_warnings(&mut warnings);
+        warnings
+    } else {
+        Vec::new()
+    };
+
     let summary = summarize(&vulnerabilities);
     Ok(AuditOutput {
         vulnerabilities,
+        warnings,
         summary,
     })
+}
+
+fn audit_settings() -> Settings {
+    Settings {
+        informational_warnings: vec![
+            Informational::Notice,
+            Informational::Unmaintained,
+            Informational::Unsound,
+        ],
+        ..Settings::default()
+    }
+}
+
+fn map_informational_warnings(report: &Report, graph: &DependencyGraph) -> Vec<AuditWarning> {
+    report
+        .warnings
+        .values()
+        .flatten()
+        .filter_map(|warning| {
+            let kind = map_warning_kind(warning.kind)?;
+            let package = &warning.package;
+            let package_name = package.name.to_string();
+            let package_version = package.version.to_string();
+            let path = dependency_path(graph, package);
+            let advisory_id = warning
+                .advisory
+                .as_ref()
+                .map(|advisory| advisory.id.to_string());
+            let title = warning
+                .advisory
+                .as_ref()
+                .map(|advisory| advisory.title.to_string());
+            let fix_available = warning
+                .versions
+                .as_ref()
+                .map(|versions| !versions.patched().is_empty());
+
+            Some(AuditWarning {
+                kind,
+                package: package_name,
+                package_version,
+                advisory_id,
+                title,
+                path,
+                fix_available,
+            })
+        })
+        .collect()
+}
+
+fn map_warning_kind(kind: RustsecWarningKind) -> Option<AuditWarningKind> {
+    match kind {
+        RustsecWarningKind::Notice => Some(AuditWarningKind::Notice),
+        RustsecWarningKind::Unmaintained => Some(AuditWarningKind::Unmaintained),
+        RustsecWarningKind::Unsound => Some(AuditWarningKind::Unsound),
+        RustsecWarningKind::Yanked => Some(AuditWarningKind::Yanked),
+        _ => None,
+    }
+}
+
+fn dependency_path(graph: &DependencyGraph, package: &RustsecPackage) -> Vec<String> {
+    let package_name = package.name.to_string();
+    graph
+        .path_to(
+            &package_name,
+            &package.version.to_string(),
+            package.source.as_ref().map(ToString::to_string).as_deref(),
+        )
+        .unwrap_or_else(|| vec![package_name])
+}
+
+fn find_yanked_warnings(lockfile: &Lockfile, graph: &DependencyGraph) -> Result<Vec<AuditWarning>> {
+    let packages: Vec<_> = lockfile
+        .packages
+        .iter()
+        .filter(|package| {
+            package
+                .source
+                .as_ref()
+                .is_some_and(|source| source.is_default_registry())
+        })
+        .collect();
+
+    if packages.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut index = CachedIndex::fetch(REGISTRY_LOCK_TIMEOUT).map_err(|err| {
+        UpkeepError::context(
+            ErrorCode::Rustsec,
+            "failed to fetch the crates.io index for yanked-package detection",
+            err,
+        )
+    })?;
+    let results = index
+        .find_yanked(packages)
+        .into_iter()
+        .map(|result| result.map_err(|err| err.to_string()));
+
+    map_yanked_results(results, graph)
+}
+
+fn map_yanked_results<'a, I>(results: I, graph: &DependencyGraph) -> Result<Vec<AuditWarning>>
+where
+    I: IntoIterator<Item = std::result::Result<&'a RustsecPackage, String>>,
+{
+    let mut warnings = Vec::new();
+    for result in results {
+        let package = result.map_err(|message| {
+            UpkeepError::message(
+                ErrorCode::Rustsec,
+                format!("failed to determine whether a resolved crate is yanked: {message}"),
+            )
+        })?;
+        warnings.push(AuditWarning {
+            kind: AuditWarningKind::Yanked,
+            package: package.name.to_string(),
+            package_version: package.version.to_string(),
+            advisory_id: None,
+            title: None,
+            path: dependency_path(graph, package),
+            fix_available: None,
+        });
+    }
+    Ok(warnings)
+}
+
+fn sort_warnings(warnings: &mut [AuditWarning]) {
+    warnings.sort_by(|left, right| {
+        (
+            left.kind,
+            &left.package,
+            &left.package_version,
+            &left.advisory_id,
+            &left.path,
+        )
+            .cmp(&(
+                right.kind,
+                &right.package,
+                &right.package_version,
+                &right.advisory_id,
+                &right.path,
+            ))
+    });
 }
 
 /// Load the advisory database, honouring [`ADVISORY_DB_ENV`].
@@ -192,11 +373,7 @@ impl DependencyGraph {
             adjacency.insert(node.id.clone(), deps);
         }
 
-        let roots = if let Some(root_package) = metadata.root_package() {
-            vec![root_package.id.clone()]
-        } else {
-            metadata.workspace_members.clone()
-        };
+        let roots = metadata.workspace_members.clone();
 
         Ok(Self {
             adjacency,
@@ -290,6 +467,8 @@ impl DependencyGraph {
 mod tests {
     use super::*;
     use cargo_metadata::MetadataCommand;
+    use std::fs;
+    use std::path::Path;
 
     fn vuln_with(severity: Severity) -> Vulnerability {
         Vulnerability {
@@ -370,6 +549,136 @@ mod tests {
     }
 
     #[test]
+    fn audit_settings_enable_every_supported_informational_warning() {
+        let settings = audit_settings();
+        assert_eq!(
+            settings.informational_warnings,
+            vec![
+                Informational::Notice,
+                Informational::Unmaintained,
+                Informational::Unsound,
+            ]
+        );
+    }
+
+    #[test]
+    fn informational_advisory_maps_to_actionable_warning() {
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("fixtures")
+            .join("advisory-db");
+        let db = Database::open(&fixture).expect("open fixture advisory database");
+        let lockfile = Lockfile::load(Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.lock"))
+            .expect("load lockfile");
+        let report = Report::generate(&db, &lockfile, &audit_settings());
+        let metadata = MetadataCommand::new().exec().expect("metadata");
+        let graph = DependencyGraph::build(&metadata).expect("graph");
+
+        let warnings = map_informational_warnings(&report, &graph);
+        let warning = warnings
+            .iter()
+            .find(|warning| warning.advisory_id.as_deref() == Some("RUSTSEC-2099-0002"))
+            .expect("fixture informational advisory should be reported");
+
+        assert_eq!(warning.kind, AuditWarningKind::Unmaintained);
+        assert_eq!(warning.package, "serde");
+        assert!(!warning.package_version.is_empty());
+        assert_eq!(
+            warning.title.as_deref(),
+            Some("Fabricated unmaintained serde notice")
+        );
+        assert_eq!(warning.fix_available, Some(false));
+        assert_eq!(warning.path.last().map(String::as_str), Some("serde"));
+    }
+
+    #[test]
+    fn yanked_result_has_no_fabricated_advisory_or_fix() {
+        let lockfile = Lockfile::load(Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.lock"))
+            .expect("load lockfile");
+        let package = lockfile
+            .packages
+            .iter()
+            .find(|package| package.name.as_str() == "serde")
+            .expect("serde package");
+        let metadata = MetadataCommand::new().exec().expect("metadata");
+        let graph = DependencyGraph::build(&metadata).expect("graph");
+
+        let warnings = map_yanked_results([Ok(package)], &graph).expect("map yanked result");
+        let warning = warnings.first().expect("one warning");
+        assert_eq!(warning.kind, AuditWarningKind::Yanked);
+        assert_eq!(warning.package, "serde");
+        assert_eq!(warning.advisory_id, None);
+        assert_eq!(warning.title, None);
+        assert_eq!(warning.fix_available, None);
+        assert_eq!(warning.path.last().map(String::as_str), Some("serde"));
+    }
+
+    #[test]
+    fn yanked_lookup_error_fails_instead_of_reporting_clean() {
+        let metadata = MetadataCommand::new().exec().expect("metadata");
+        let graph = DependencyGraph::build(&metadata).expect("graph");
+        let results: Vec<std::result::Result<&RustsecPackage, String>> =
+            vec![Err("index unavailable".to_string())];
+
+        let error = map_yanked_results(results, &graph).expect_err("lookup must fail");
+        assert_eq!(error.code(), ErrorCode::Rustsec);
+        assert!(error.to_string().contains("index unavailable"));
+    }
+
+    #[test]
+    fn warning_order_is_deterministic() {
+        let mut warnings = vec![
+            AuditWarning {
+                kind: AuditWarningKind::Yanked,
+                package: "zeta".to_string(),
+                package_version: "1.0.0".to_string(),
+                advisory_id: None,
+                title: None,
+                path: vec!["root".to_string(), "zeta".to_string()],
+                fix_available: None,
+            },
+            AuditWarning {
+                kind: AuditWarningKind::Notice,
+                package: "alpha".to_string(),
+                package_version: "2.0.0".to_string(),
+                advisory_id: Some("RUSTSEC-2099-0003".to_string()),
+                title: Some("Notice".to_string()),
+                path: vec!["root".to_string(), "alpha".to_string()],
+                fix_available: Some(true),
+            },
+            AuditWarning {
+                kind: AuditWarningKind::Notice,
+                package: "alpha".to_string(),
+                package_version: "1.0.0".to_string(),
+                advisory_id: Some("RUSTSEC-2099-0004".to_string()),
+                title: Some("Notice".to_string()),
+                path: vec!["root".to_string(), "alpha".to_string()],
+                fix_available: Some(false),
+            },
+        ];
+
+        sort_warnings(&mut warnings);
+        let keys: Vec<_> = warnings
+            .iter()
+            .map(|warning| {
+                (
+                    warning.kind,
+                    warning.package.as_str(),
+                    warning.package_version.as_str(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            keys,
+            vec![
+                (AuditWarningKind::Notice, "alpha", "1.0.0"),
+                (AuditWarningKind::Notice, "alpha", "2.0.0"),
+                (AuditWarningKind::Yanked, "zeta", "1.0.0"),
+            ]
+        );
+    }
+
+    #[test]
     fn dependency_graph_path_to_returns_none_for_missing_package() {
         let metadata = MetadataCommand::new().exec().expect("metadata");
         let graph = DependencyGraph::build(&metadata).expect("graph");
@@ -426,6 +735,65 @@ mod tests {
             exact_path.last().map(String::as_str),
             Some(registry_pkg.name.as_str()),
             "exact path should end with the registry package name"
+        );
+    }
+
+    #[test]
+    fn dependency_graph_includes_dependencies_owned_only_by_a_workspace_member() {
+        let temp = tempfile::tempdir().expect("temp workspace");
+        fs::create_dir_all(temp.path().join("src")).expect("root source directory");
+        fs::create_dir_all(temp.path().join("member/src")).expect("member source directory");
+        fs::create_dir_all(temp.path().join("shared/src")).expect("dependency source directory");
+
+        fs::write(
+            temp.path().join("Cargo.toml"),
+            r#"[package]
+name = "workspace-root"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+members = ["member"]
+exclude = ["shared"]
+resolver = "2"
+"#,
+        )
+        .expect("root manifest");
+        fs::write(temp.path().join("src/lib.rs"), "").expect("root source");
+        fs::write(
+            temp.path().join("member/Cargo.toml"),
+            r#"[package]
+name = "member"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+shared = { path = "../shared" }
+"#,
+        )
+        .expect("member manifest");
+        fs::write(temp.path().join("member/src/lib.rs"), "").expect("member source");
+        fs::write(
+            temp.path().join("shared/Cargo.toml"),
+            r#"[package]
+name = "shared"
+version = "0.1.0"
+edition = "2021"
+"#,
+        )
+        .expect("dependency manifest");
+        fs::write(temp.path().join("shared/src/lib.rs"), "").expect("dependency source");
+
+        let metadata = MetadataCommand::new()
+            .manifest_path(temp.path().join("Cargo.toml"))
+            .exec()
+            .expect("workspace metadata");
+        assert!(metadata.root_package().is_some(), "root must be a package");
+
+        let graph = DependencyGraph::build(&metadata).expect("dependency graph");
+        assert_eq!(
+            graph.path_to("shared", "0.1.0", None),
+            Some(vec!["member".to_string(), "shared".to_string()])
         );
     }
 }

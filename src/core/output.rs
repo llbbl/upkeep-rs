@@ -110,7 +110,44 @@ pub struct UnsafeOutput {
 #[derive(Debug, Serialize)]
 pub struct AuditOutput {
     pub vulnerabilities: Vec<Vulnerability>,
+    /// Non-vulnerability findings such as informational advisories and yanked
+    /// resolved crate versions. These do not contribute to `summary`.
+    pub warnings: Vec<AuditWarning>,
     pub summary: AuditSummary,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AuditWarning {
+    pub kind: AuditWarningKind,
+    pub package: String,
+    pub package_version: String,
+    pub advisory_id: Option<String>,
+    pub title: Option<String>,
+    pub path: Vec<String>,
+    /// Whether the advisory names a patched version. Yanked findings leave
+    /// this `None`: a yank alone does not establish a safe replacement.
+    pub fix_available: Option<bool>,
+}
+
+#[derive(Debug, Serialize, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "lowercase")]
+pub enum AuditWarningKind {
+    Notice,
+    Unmaintained,
+    Unsound,
+    Yanked,
+}
+
+impl fmt::Display for AuditWarningKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let label = match self {
+            Self::Notice => "notice",
+            Self::Unmaintained => "unmaintained",
+            Self::Unsound => "unsound",
+            Self::Yanked => "yanked",
+        };
+        write!(f, "{label}")
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -641,46 +678,73 @@ impl fmt::Display for AuditOutput {
         writeln!(f, "Low: {}", self.summary.low)?;
         if self.vulnerabilities.is_empty() {
             writeln!(f, "Details: none")?;
-            return Ok(());
-        }
+        } else {
+            let mut id_width = "id".len();
+            let mut package_width = "package".len();
+            let mut version_width = "version".len();
+            let mut severity_width = "severity".len();
 
-        let mut id_width = "id".len();
-        let mut package_width = "package".len();
-        let mut version_width = "version".len();
-        let mut severity_width = "severity".len();
+            for vulnerability in &self.vulnerabilities {
+                id_width = id_width.max(vulnerability.id.len());
+                package_width = package_width.max(vulnerability.package.len());
+                version_width = version_width.max(vulnerability.package_version.len());
+                severity_width = severity_width.max(vulnerability.severity.to_string().len());
+            }
 
-        for vulnerability in &self.vulnerabilities {
-            id_width = id_width.max(vulnerability.id.len());
-            package_width = package_width.max(vulnerability.package.len());
-            version_width = version_width.max(vulnerability.package_version.len());
-            severity_width = severity_width.max(vulnerability.severity.to_string().len());
-        }
-
-        writeln!(f, "Details:")?;
-        writeln!(
-            f,
-            "{:<id_width$}  {:<package_width$}  {:<version_width$}  {:<severity_width$}",
-            "id",
-            "package",
-            "version",
-            "severity",
-            id_width = id_width,
-            package_width = package_width,
-            version_width = version_width,
-            severity_width = severity_width
-        )?;
-        for vulnerability in &self.vulnerabilities {
+            writeln!(f, "Details:")?;
             writeln!(
                 f,
                 "{:<id_width$}  {:<package_width$}  {:<version_width$}  {:<severity_width$}",
-                vulnerability.id,
-                vulnerability.package,
-                vulnerability.package_version,
-                vulnerability.severity,
+                "id",
+                "package",
+                "version",
+                "severity",
                 id_width = id_width,
                 package_width = package_width,
                 version_width = version_width,
                 severity_width = severity_width
+            )?;
+            for vulnerability in &self.vulnerabilities {
+                writeln!(
+                    f,
+                    "{:<id_width$}  {:<package_width$}  {:<version_width$}  {:<severity_width$}",
+                    vulnerability.id,
+                    vulnerability.package,
+                    vulnerability.package_version,
+                    vulnerability.severity,
+                    id_width = id_width,
+                    package_width = package_width,
+                    version_width = version_width,
+                    severity_width = severity_width
+                )?;
+            }
+        }
+
+        writeln!(f, "Warnings: {}", self.warnings.len())?;
+        if self.warnings.is_empty() {
+            writeln!(f, "Warning details: none")?;
+            return Ok(());
+        }
+
+        writeln!(f, "Warning details:")?;
+        for warning in &self.warnings {
+            let advisory = warning.advisory_id.as_deref().unwrap_or("-");
+            let title = warning.title.as_deref().unwrap_or("-");
+            let fix = match warning.fix_available {
+                Some(true) => "yes",
+                Some(false) => "no",
+                None => "unknown",
+            };
+            writeln!(
+                f,
+                "{} {} {}: advisory {}; fix available {}; path {}; {}",
+                warning.kind,
+                warning.package,
+                warning.package_version,
+                advisory,
+                fix,
+                warning.path.join(" -> "),
+                title
             )?;
         }
         Ok(())
@@ -955,6 +1019,15 @@ mod tests {
                 path: vec!["root".to_string(), "serde".to_string()],
                 fix_available: true,
             }],
+            warnings: vec![AuditWarning {
+                kind: AuditWarningKind::Unmaintained,
+                package: "example-old".to_string(),
+                package_version: "0.1.0".to_string(),
+                advisory_id: Some("RUSTSEC-0000-0001".to_string()),
+                title: Some("Example crate is unmaintained".to_string()),
+                path: vec!["root".to_string(), "example-old".to_string()],
+                fix_available: Some(false),
+            }],
             summary: AuditSummary {
                 critical: 0,
                 high: 1,
@@ -1126,6 +1199,14 @@ mod tests {
         assert_eq!(
             value_at(&audit_value, "vulnerabilities")[0]["id"],
             Value::String("RUSTSEC-0000-0000".into())
+        );
+        assert_eq!(
+            value_at(&audit_value, "warnings")[0]["kind"],
+            Value::String("unmaintained".into())
+        );
+        assert_eq!(
+            value_at(&audit_value, "warnings")[0]["fix_available"],
+            Value::Bool(false)
         );
 
         let deps_value = serialized_value(&deps);
@@ -1430,6 +1511,7 @@ mod tests {
     fn display_audit_output_variants() {
         let empty = AuditOutput {
             vulnerabilities: Vec::new(),
+            warnings: Vec::new(),
             summary: AuditSummary {
                 critical: 0,
                 high: 0,
@@ -1451,6 +1533,15 @@ mod tests {
                 path: vec!["root".to_string()],
                 fix_available: false,
             }],
+            warnings: vec![AuditWarning {
+                kind: AuditWarningKind::Yanked,
+                package: "old-dep".to_string(),
+                package_version: "0.1.0".to_string(),
+                advisory_id: None,
+                title: None,
+                path: vec!["root".to_string(), "old-dep".to_string()],
+                fix_available: None,
+            }],
             summary: AuditSummary {
                 critical: 0,
                 high: 1,
@@ -1463,6 +1554,11 @@ mod tests {
         assert!(text.contains("Details:"));
         assert!(text.contains("id"));
         assert!(text.contains("RUSTSEC-0000-0000"));
+        assert!(text.contains("Warnings: 1"));
+        assert!(text.contains("yanked old-dep 0.1.0"));
+        assert!(text.contains("advisory -"));
+        assert!(text.contains("fix available unknown"));
+        assert!(text.contains("root -> old-dep"));
     }
 
     #[test]

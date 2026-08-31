@@ -40,7 +40,9 @@ Crates.io lookups are serialized and delayed to roughly one request per second. 
 
 ### Security scope
 
-`audit` checks RustSec advisories against the resolved lockfile. In practice that means resolved crates.io packages: path, git, vendored, and alternate-registry dependencies are not reported as advisory matches. The same effective RustSec scope applies to `deps --security` and to the security component inside `quality`.
+`audit` checks RustSec advisories against the resolved lockfile. In practice that means resolved crates.io packages: path, git, vendored, and alternate-registry dependencies are not reported as advisory matches. Vulnerabilities remain in `vulnerabilities` and its severity `summary`; RustSec `notice`, `unmaintained`, and `unsound` informational advisories are reported separately in `warnings`. Standalone `audit` also refreshes the crates.io index and reports yanked resolved versions as warnings. A registry or per-package lookup failure fails the standalone command, so an unavailable yanked scan cannot look clean.
+
+Warnings are not vulnerabilities and never contribute to `AuditSummary`. The `deps --security` output and the security component inside `quality` intentionally run a vulnerability-only scan, so informational/yanked findings and crates.io-index availability cannot change the quality grade.
 
 ### Advisory database source
 
@@ -59,10 +61,13 @@ outer one, and `gix` makes a single attempt with no retry or backoff, so the
 audit errors immediately.
 
 Setting `UPKEEP_ADVISORY_DB` to a local advisory-database checkout reads that
-path instead and fetches nothing. The layout is the advisory-db repository's own
+path instead and fetches no advisory data. The layout is the advisory-db repository's own
 (`crates/<package>/<RUSTSEC-ID>.md`), and the caller owns keeping it current —
-`cargo-upkeep` will not update it. This is what an offline or air-gapped run
-needs, and what the integration tests use to stay off the shared cache.
+`cargo-upkeep` will not update it. Standalone `audit` still refreshes the
+crates.io index for yanked-package detection when the lockfile contains
+crates.io packages; `UPKEEP_ADVISORY_DB` does not disable that check. The
+vulnerability-only scans used by `quality` and `deps --security` do not perform
+the yanked lookup.
 
 A set-but-empty value is an error rather than a fallback to fetching.
 
@@ -96,7 +101,7 @@ If nothing can be measured, `score` and `grade` are `null`. If only some metrics
 
 - The canonical JSON examples in [commands.md](./commands.md) are checked in Rust tests against serialized representative output values.
 - Network-dependent dependency tests skip when crates.io is unavailable unless the environment explicitly requires them.
-- The CLI tests point `UPKEEP_ADVISORY_DB` at a committed fixture database, so they never fetch or lock `~/.cargo/advisory-db`. The fixture carries a fabricated advisory that no real database contains, which is what makes a silent fallback to the shared cache a test failure rather than a quiet pass.
+- The CLI tests point `UPKEEP_ADVISORY_DB` at a committed fixture database, so they never fetch or lock `~/.cargo/advisory-db`. Analyzer tests open the fixture directly for advisory-warning mapping; yanked mapping and failure behavior use synthetic lookup results and never contact the crates.io index.
 - Full behavior coverage for `unused` and `unsafe-code` requires the matching optional cargo subcommands to be installed.
 
 ## Source of truth

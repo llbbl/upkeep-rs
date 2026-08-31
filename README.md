@@ -15,7 +15,7 @@ For `cargo-binstall`, the install script, and source builds, see [docs/installat
 
 ## Why use it
 
-- One command surface for dependency freshness, RustSec advisories, unused dependencies, unsafe code, dependency trees, and a graded quality summary.
+- One command surface for dependency freshness, RustSec vulnerabilities and informational warnings, yanked resolved crates, unused dependencies, unsafe code, dependency trees, and a graded quality summary.
 - One JSON shape per subcommand, with stdout reserved for machine-readable output and diagnostics kept on stderr.
 - Workspace-aware dependency reporting: `deps` groups by crate name plus resolved version, and tells you which members actually own each result.
 - A single `quality` grade that stays honest about partial runs through `complete`, `measured_weight`, and `unavailable`.
@@ -92,6 +92,11 @@ cargo upkeep deps --json --security
 ```
 
 Selected fields from a real run on this repository on August 30, 2026. The full `deps` contract, including `packages`, `skipped_packages`, and workspace attribution rules, is in [docs/commands.md#deps](./docs/commands.md#deps).
+
+For the full security picture, `cargo upkeep audit` reports vulnerabilities
+separately from informational `notice`, `unmaintained`, and `unsound` advisories
+and yanked resolved versions. Warnings are actionable findings, but they are not
+vulnerabilities and do not change the vulnerability summary or `quality` grade.
 
 ## Docs
 

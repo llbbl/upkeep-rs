@@ -32,7 +32,9 @@ fn map_audit_join_error(err: tokio::task::JoinError) -> UpkeepError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::output::{AuditOutput, AuditSummary, Severity, Vulnerability};
+    use crate::core::output::{
+        AuditOutput, AuditSummary, AuditWarning, AuditWarningKind, Severity, Vulnerability,
+    };
     use serde_json::Value;
 
     #[tokio::test]
@@ -70,6 +72,15 @@ mod tests {
                 path: vec!["root".to_string()],
                 fix_available: true,
             }],
+            warnings: vec![AuditWarning {
+                kind: AuditWarningKind::Yanked,
+                package: "old-dep".to_string(),
+                package_version: "0.1.0".to_string(),
+                advisory_id: None,
+                title: None,
+                path: vec!["root".to_string(), "old-dep".to_string()],
+                fix_available: None,
+            }],
             summary: AuditSummary {
                 critical: 0,
                 high: 1,
@@ -89,6 +100,8 @@ mod tests {
                     value["vulnerabilities"][0]["severity"],
                     Value::String("high".into())
                 );
+                assert_eq!(value["warnings"][0]["kind"], "yanked");
+                assert!(value["warnings"][0]["advisory_id"].is_null());
                 Ok(())
             },
             |_| Ok(()),

@@ -4,7 +4,7 @@ use std::fs;
 
 use crate::cli::commands::deps;
 use crate::core::analyzers::{
-    audit::run_audit, clippy::run_clippy, unsafe_code::run_unsafe, unused::run_unused,
+    audit::run_vulnerability_audit, clippy::run_clippy, unsafe_code::run_unsafe, unused::run_unused,
 };
 use crate::core::error::{ErrorCode, Result, UpkeepError};
 use crate::core::output::{
@@ -18,7 +18,7 @@ use crate::core::scorers::quality::{
 
 pub async fn run(json: bool) -> Result<()> {
     let deps_future = deps::analyze(false);
-    let audit_future = run_blocking("audit", run_audit);
+    let audit_future = run_blocking("audit", run_vulnerability_audit);
     let clippy_future = run_clippy();
     let msrv_future = check_msrv();
     let unused_future = run_unused();
@@ -311,10 +311,11 @@ mod tests {
     use crate::core::analyzers::clippy::parse_diagnostics;
     use crate::core::error::{ErrorCode, UpkeepError};
     use crate::core::output::{
-        AuditOutput, AuditSummary, ClippyOutput, Confidence, DependencyType, DepsOutput, Grade,
-        MetricScore, OutdatedPackage, QualityOutput, Severity, SkipReason, SkippedDependency,
-        UnavailableMetric, UnavailableReason, UnsafeOutput, UnsafePackage,
-        UnsafeSummary as UnsafeOutputSummary, UnusedDep, UnusedOutput, UpdateType, Vulnerability,
+        AuditOutput, AuditSummary, AuditWarning, AuditWarningKind, ClippyOutput, Confidence,
+        DependencyType, DepsOutput, Grade, MetricScore, OutdatedPackage, QualityOutput, Severity,
+        SkipReason, SkippedDependency, UnavailableMetric, UnavailableReason, UnsafeOutput,
+        UnsafePackage, UnsafeSummary as UnsafeOutputSummary, UnusedDep, UnusedOutput, UpdateType,
+        Vulnerability,
     };
     use crate::core::scorers::quality::{
         score_quality, Availability, QualityInputs, SecuritySummary, UnsafeSummary, UnusedSummary,
@@ -412,6 +413,29 @@ mod tests {
     fn clean_audit() -> AuditOutput {
         AuditOutput {
             vulnerabilities: Vec::new(),
+            warnings: Vec::new(),
+            summary: AuditSummary {
+                critical: 0,
+                high: 0,
+                moderate: 0,
+                low: 0,
+                total: 0,
+            },
+        }
+    }
+
+    fn warning_only_audit() -> AuditOutput {
+        AuditOutput {
+            vulnerabilities: Vec::new(),
+            warnings: vec![AuditWarning {
+                kind: AuditWarningKind::Unmaintained,
+                package: "legacy".to_string(),
+                package_version: "1.0.0".to_string(),
+                advisory_id: Some("RUSTSEC-2099-0002".to_string()),
+                title: Some("Legacy is unmaintained".to_string()),
+                path: vec!["demo".to_string(), "legacy".to_string()],
+                fix_available: Some(false),
+            }],
             summary: AuditSummary {
                 critical: 0,
                 high: 0,
@@ -528,6 +552,7 @@ mod tests {
                 total: vulnerabilities.len(),
             },
             vulnerabilities,
+            warnings: Vec::new(),
         }
     }
 
@@ -985,6 +1010,30 @@ mod tests {
         );
 
         assert_eq!(score_of(&output, METRIC_SECURITY), expected);
+    }
+
+    #[test]
+    fn audit_warnings_do_not_affect_the_quality_grade() {
+        let clean = build_quality_output(
+            Ok(deps_output(0, 0, 0, 0)),
+            Ok(clean_audit()),
+            Ok(clean_clippy()),
+            Ok(MsrvStatus::Valid),
+            Ok(clean_unused()),
+            Ok(clean_unsafe()),
+        );
+        let warned = build_quality_output(
+            Ok(deps_output(0, 0, 0, 0)),
+            Ok(warning_only_audit()),
+            Ok(clean_clippy()),
+            Ok(MsrvStatus::Valid),
+            Ok(clean_unused()),
+            Ok(clean_unsafe()),
+        );
+
+        assert_eq!(score_of(&warned, METRIC_SECURITY), Some(100.0));
+        assert_eq!(warned.score, clean.score);
+        assert_eq!(warned.grade, clean.grade);
     }
 
     /// `build_quality_output` must count the *confirmed* unused dependencies.
