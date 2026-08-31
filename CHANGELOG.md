@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.4.0] - 2026-08-31
+
+### Features
+
+- **audit:** Surface informational advisories and yanked crates
 ## [0.3.15] - 2026-08-31
 
 ### Miscellaneous
