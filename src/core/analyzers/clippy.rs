@@ -4,6 +4,10 @@ use tokio::process::Command;
 
 use crate::core::error::{ErrorCode, Result, UpkeepError};
 use crate::core::output::{ClippyIssue, ClippyOutput};
+// The penalty formula is the scorer's, not this module's: `ClippyOutput.score`
+// and the quality breakdown's Clippy entry are the same number reported by two
+// commands, and this module having its own copy let them drift (#37).
+use crate::core::scorers::quality::{clippy_score, ClippySummary};
 
 #[derive(Debug, Deserialize)]
 struct CargoMessage {
@@ -149,7 +153,15 @@ fn is_clippy_missing(stderr: &str) -> bool {
 /// This reports only what clippy actually said. The exit status is handled by
 /// the caller, because "clippy ran and found nothing" and "clippy never ran"
 /// are different outcomes that must not both become a `ClippyOutput`.
-fn parse_diagnostics(stdout: &str) -> ClippyOutput {
+///
+/// `pub(crate)` only so `clippy_command_and_quality_breakdown_agree` in
+/// `cli::commands::quality` can build a real `ClippyOutput` from fixture
+/// diagnostics. That test has to run the genuine `build_quality_output` to
+/// cover the `ClippyOutput` -> `ClippySummary` mapping, and a hand-built
+/// fixture would have to compute `score` itself — reintroducing exactly the
+/// second copy of the formula #37 removed. It stays a pure function of its
+/// input; `run_clippy` remains the only production entry point.
+pub(crate) fn parse_diagnostics(stdout: &str) -> ClippyOutput {
     let mut warnings = 0;
     let mut errors = 0;
     let mut warnings_by_lint: HashMap<String, usize> = HashMap::new();
@@ -201,7 +213,7 @@ fn parse_diagnostics(stdout: &str) -> ClippyOutput {
     }
 
     ClippyOutput {
-        score: clippy_score(warnings, errors),
+        score: clippy_score(&ClippySummary { warnings, errors }),
         warnings,
         errors,
         warnings_by_lint,
@@ -219,12 +231,10 @@ fn push_driver_error(output: &mut ClippyOutput, clippy_status: &str) {
         file: None,
         line: None,
     });
-    output.score = clippy_score(output.warnings, output.errors);
-}
-
-fn clippy_score(warnings: usize, errors: usize) -> f32 {
-    let penalty = (warnings as u64 * 2) + (errors as u64 * 10);
-    100u64.saturating_sub(penalty) as f32
+    output.score = clippy_score(&ClippySummary {
+        warnings: output.warnings,
+        errors: output.errors,
+    });
 }
 
 #[cfg(test)]
