@@ -238,8 +238,14 @@ impl MemberVersions {
     /// `[dev-dependencies]` plus two `cfg`-gated dev sections yields three `Dev`
     /// entries on a single edge, and [`build_resolved_versions`] writes this map
     /// once per entry. Without the equal-version arm every `cfg`-multiplexed
-    /// dependency would poison itself. `-Zbindeps` artifact dependencies can
-    /// likewise put one package id in `node.deps` more than once.
+    /// dependency would poison itself.
+    ///
+    /// `-Zbindeps` artifact dependencies are the same mechanism, not a second
+    /// one: cargo pushes one `Dep` per resolved dependency id and appends an
+    /// extra `DepKindInfo` per matched artifact target, so they repeat *within*
+    /// an edge exactly as `cfg` targets do. `convert_dependency_kind` reads only
+    /// `.kind`, and this crate's `cargo_metadata` does not expose `artifact` at
+    /// all, so the two are indistinguishable from here.
     ///
     /// Two *different* versions under one name is the case this map exists to
     /// catch, and cargo does permit it across kinds — what cargo rejects is one
@@ -1021,16 +1027,18 @@ fn classify_registry_source(source: Option<&String>) -> RegistrySource {
 #[cfg(test)]
 mod tests {
     use super::{
-        classify_registry_source, classify_update, get_latest_version, merge_dependency_type,
+        build_packages_map, build_resolved_versions, classify_registry_source, classify_update,
+        find_member_nodes, get_latest_version, get_resolve, merge_dependency_type,
         not_applicable_count, partition_edge, process_dependencies, resolve_current_version,
-        resolve_dependencies, run_with_output, DependencyEdge, MemberVersions, Processed,
-        RegistrySource, SkippedCollector,
+        resolve_dependencies, run_with_output, workspace_packages, DependencyEdge, MemberVersions,
+        Processed, RegistrySource, SkippedCollector,
     };
     use crate::core::analyzers::crates_io::VersionInfo;
     use crate::core::error::{ErrorCode, UpkeepError};
     use crate::core::output::{
         DependencyType, DepsOutput, OutdatedPackage, SkipReason, SkippedDependency, UpdateType,
     };
+    use cargo_metadata::Metadata;
     use semver::Version;
     use serde_json::Value;
     use std::collections::HashMap;
@@ -1330,6 +1338,356 @@ mod tests {
             Some(&Version::parse("0.2.100").expect("parse")),
             "poisoning the dev kind must leave the normal kind resolvable"
         );
+    }
+
+    /// Drive the real resolve pipeline over a `cargo metadata` JSON document.
+    ///
+    /// The accessor-level tests above build `MemberVersions` by hand, which pins
+    /// what the map *does* with a write but says nothing about which writes
+    /// `build_resolved_versions` actually issues. These fixtures close that gap by
+    /// deserializing real metadata and running the same helper chain `analyze`
+    /// runs, so the linkage between a `node.deps` edge and the two maps is under
+    /// test rather than assumed.
+    fn resolved_versions_from_metadata(json: &str) -> Vec<MemberVersions> {
+        let metadata: Metadata = serde_json::from_str(json).expect("parse metadata fixture");
+        let packages_by_id = build_packages_map(&metadata);
+        let members = workspace_packages(&metadata, &packages_by_id).expect("workspace members");
+        let resolve = get_resolve(&metadata).expect("resolve");
+        let nodes = find_member_nodes(resolve, &members).expect("member nodes");
+        build_resolved_versions(&members, &nodes, &packages_by_id)
+    }
+
+    /// Real `cargo metadata --format-version 1` output for a crate that depends on
+    /// one path crate from `[dependencies]`, `[dev-dependencies]`,
+    /// `[build-dependencies]`, `[target.'cfg(unix)'.dev-dependencies]` and
+    /// `[target.'cfg(windows)'.dev-dependencies]`. Cargo collapses all five
+    /// manifest entries into a *single* `node.deps` edge carrying one
+    /// `DepKindInfo` per (kind, target) pair — three of which are `dev`.
+    ///
+    /// Edited only by shortening the absolute paths (the scratch crate lived
+    /// under a long temp path) and dropping serde-defaulted package fields that
+    /// carry no information here — `authors`, `license`, `publish` and the like,
+    /// plus the top-level `build_directory`. Every *retained* field name,
+    /// ordering and null is verbatim cargo output, `dep_kinds` ordering included
+    /// (cargo sorts that array).
+    /// The dependency is deliberately dash-named so `dep.name` (the lib target
+    /// name, `multi_kind_dep`) and `package.name` (`multi-kind-dep`) diverge —
+    /// a fixture that used one name for both would make the two maps look
+    /// interchangeable.
+    const CFG_MULTIPLEXED_METADATA: &str = r#"{
+      "packages": [
+        {
+          "name": "multi-kind-dep",
+          "version": "1.2.3",
+          "id": "path+file:///w/mx/dep-crate#multi-kind-dep@1.2.3",
+          "source": null,
+          "dependencies": [],
+          "targets": [
+            {
+              "kind": ["lib"],
+              "crate_types": ["lib"],
+              "name": "multi_kind_dep",
+              "src_path": "/w/mx/dep-crate/src/lib.rs",
+              "edition": "2021",
+              "doc": true,
+              "doctest": true,
+              "test": true
+            }
+          ],
+          "features": {},
+          "manifest_path": "/w/mx/dep-crate/Cargo.toml",
+          "edition": "2021"
+        },
+        {
+          "name": "mx-root",
+          "version": "0.1.0",
+          "id": "path+file:///w/mx#mx-root@0.1.0",
+          "source": null,
+          "dependencies": [
+            {"name": "multi-kind-dep", "source": null, "req": "*", "kind": null, "rename": null, "optional": false, "uses_default_features": true, "features": [], "target": null, "registry": null, "path": "/w/mx/dep-crate"},
+            {"name": "multi-kind-dep", "source": null, "req": "*", "kind": "dev", "rename": null, "optional": false, "uses_default_features": true, "features": [], "target": null, "registry": null, "path": "/w/mx/dep-crate"},
+            {"name": "multi-kind-dep", "source": null, "req": "*", "kind": "build", "rename": null, "optional": false, "uses_default_features": true, "features": [], "target": null, "registry": null, "path": "/w/mx/dep-crate"},
+            {"name": "multi-kind-dep", "source": null, "req": "*", "kind": "dev", "rename": null, "optional": false, "uses_default_features": true, "features": [], "target": "cfg(unix)", "registry": null, "path": "/w/mx/dep-crate"},
+            {"name": "multi-kind-dep", "source": null, "req": "*", "kind": "dev", "rename": null, "optional": false, "uses_default_features": true, "features": [], "target": "cfg(windows)", "registry": null, "path": "/w/mx/dep-crate"}
+          ],
+          "targets": [
+            {
+              "kind": ["lib"],
+              "crate_types": ["lib"],
+              "name": "mx_root",
+              "src_path": "/w/mx/src/lib.rs",
+              "edition": "2021",
+              "doc": true,
+              "doctest": true,
+              "test": true
+            }
+          ],
+          "features": {},
+          "manifest_path": "/w/mx/Cargo.toml",
+          "edition": "2021"
+        }
+      ],
+      "workspace_members": ["path+file:///w/mx#mx-root@0.1.0"],
+      "workspace_default_members": ["path+file:///w/mx#mx-root@0.1.0"],
+      "resolve": {
+        "nodes": [
+          {
+            "id": "path+file:///w/mx/dep-crate#multi-kind-dep@1.2.3",
+            "dependencies": [],
+            "deps": [],
+            "features": []
+          },
+          {
+            "id": "path+file:///w/mx#mx-root@0.1.0",
+            "dependencies": ["path+file:///w/mx/dep-crate#multi-kind-dep@1.2.3"],
+            "deps": [
+              {
+                "name": "multi_kind_dep",
+                "pkg": "path+file:///w/mx/dep-crate#multi-kind-dep@1.2.3",
+                "dep_kinds": [
+                  {"kind": null, "target": null},
+                  {"kind": "dev", "target": null},
+                  {"kind": "dev", "target": "cfg(unix)"},
+                  {"kind": "dev", "target": "cfg(windows)"},
+                  {"kind": "build", "target": null}
+                ]
+              }
+            ],
+            "features": []
+          }
+        ],
+        "root": "path+file:///w/mx#mx-root@0.1.0"
+      },
+      "target_directory": "/w/mx/target",
+      "version": 1,
+      "workspace_root": "/w/mx",
+      "metadata": null
+    }"#;
+
+    #[test]
+    fn build_resolved_versions_registers_every_kind_of_a_cfg_multiplexed_edge() {
+        let versions = resolved_versions_from_metadata(CFG_MULTIPLEXED_METADATA);
+        assert_eq!(versions.len(), 1);
+        let member = &versions[0];
+        assert_eq!(member.member, "mx-root");
+
+        let resolved = Version::new(1, 2, 3);
+        for kind in [
+            DependencyType::Normal,
+            DependencyType::Dev,
+            DependencyType::Build,
+        ] {
+            assert_eq!(
+                member.dep_version("multi_kind_dep", kind),
+                Some(&resolved),
+                "{kind:?} missing from by_dep_name"
+            );
+            assert_eq!(
+                member.package_version("multi-kind-dep", kind),
+                Some(&resolved),
+                "{kind:?} missing from by_package_name"
+            );
+            assert!(
+                !member.is_ambiguous_package_name("multi-kind-dep", kind),
+                "{kind:?} was poisoned by same-kind repeats of one version"
+            );
+        }
+
+        // Three of the five `DepKindInfo` entries are `dev`, so this single edge
+        // writes `(multi-kind-dep, Dev)` three times with an identical version.
+        // Removing the equal-version arm turns the `Dev` entry above into `None`
+        // and this crate into an `ambiguous_resolve` report. Hoisting
+        // `insert_package_version` out of the kind loop drops two of the three
+        // entries, and reddens this test several assertions earlier.
+        //
+        // Deduplicating the kind list is the one refactor this test cannot see,
+        // and that is because it breaks nothing: both inserts are idempotent for
+        // an identical `(name, kind, version)` within one edge, so a dedup only
+        // removes writes that were already no-ops. It is output-equivalent, so no
+        // black-box test over this function can distinguish it.
+        assert_eq!(
+            member.by_package_name.len(),
+            3,
+            "five dep_kinds entries collapse to three distinct kinds"
+        );
+
+        // The two maps are keyed by different names. A fixture that blurred them
+        // would let a wrong lookup chain pass.
+        assert_eq!(
+            member.dep_version("multi-kind-dep", DependencyType::Normal),
+            None
+        );
+        assert_eq!(
+            member.package_version("multi_kind_dep", DependencyType::Normal),
+            None
+        );
+    }
+
+    #[test]
+    fn build_resolved_versions_treats_an_edge_without_dep_kinds_as_normal() {
+        // Cargo omits `dep_kinds` on metadata formats older than the field, and
+        // `build_resolved_versions` counts such an edge as a single normal
+        // dependency in *both* maps. This is the `.chain(...)` fallback; dropping
+        // it leaves the edge in neither map.
+        // Strip the `dep_kinds` key out of the sole node dep that carries one. The
+        // field is `#[serde(default)]`, so an absent key is what an old metadata
+        // format looks like — deleting it beats hand-writing a second fixture that
+        // could drift from the one above.
+        let start = CFG_MULTIPLEXED_METADATA
+            .find("\"dep_kinds\"")
+            .expect("node dep carries dep_kinds");
+        let end = start
+            + CFG_MULTIPLEXED_METADATA[start..]
+                .find(']')
+                .expect("dep_kinds array closes")
+            + 1;
+        let head = CFG_MULTIPLEXED_METADATA[..start].trim_end();
+        let json = format!(
+            "{}{}",
+            head.strip_suffix(',').expect("dep_kinds follows a field"),
+            &CFG_MULTIPLEXED_METADATA[end..]
+        );
+        assert!(!json.contains("dep_kinds"), "dep_kinds was not removed");
+
+        let versions = resolved_versions_from_metadata(&json);
+        assert_eq!(
+            versions.len(),
+            1,
+            "the fixture declares one workspace member"
+        );
+        let member = &versions[0];
+        let resolved = Version::new(1, 2, 3);
+
+        assert_eq!(
+            member.dep_version("multi_kind_dep", DependencyType::Normal),
+            Some(&resolved)
+        );
+        assert_eq!(
+            member.package_version("multi-kind-dep", DependencyType::Normal),
+            Some(&resolved)
+        );
+        assert_eq!(member.by_dep_name.len(), 1);
+        assert_eq!(member.by_package_name.len(), 1);
+    }
+
+    /// Real `cargo metadata` output for `itoa = "0.4"` in `[dependencies]` and
+    /// `itoa = "1.0"` in `[dev-dependencies]`: one package name, two resolved
+    /// package ids, two `node.deps` edges that share the lib target name `itoa`
+    /// and differ only in kind. Paths and the package list are trimmed to the two
+    /// crates that matter; the ids, versions, `dep_kinds` and edge names are cargo's.
+    const DIVERGENT_KIND_METADATA: &str = r#"{
+      "packages": [
+        {
+          "name": "itoa",
+          "version": "0.4.8",
+          "id": "registry+https://github.com/rust-lang/crates.io-index#itoa@0.4.8",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "dependencies": [],
+          "targets": [
+            {"kind": ["lib"], "crate_types": ["lib"], "name": "itoa", "src_path": "/r/itoa-0.4.8/src/lib.rs", "edition": "2015", "doc": true, "doctest": true, "test": true}
+          ],
+          "features": {},
+          "manifest_path": "/r/itoa-0.4.8/Cargo.toml",
+          "edition": "2015"
+        },
+        {
+          "name": "itoa",
+          "version": "1.0.18",
+          "id": "registry+https://github.com/rust-lang/crates.io-index#itoa@1.0.18",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "dependencies": [],
+          "targets": [
+            {"kind": ["lib"], "crate_types": ["lib"], "name": "itoa", "src_path": "/r/itoa-1.0.18/src/lib.rs", "edition": "2018", "doc": true, "doctest": true, "test": true}
+          ],
+          "features": {},
+          "manifest_path": "/r/itoa-1.0.18/Cargo.toml",
+          "edition": "2018"
+        },
+        {
+          "name": "dv-root",
+          "version": "0.1.0",
+          "id": "path+file:///w/dv#dv-root@0.1.0",
+          "source": null,
+          "dependencies": [
+            {"name": "itoa", "source": "registry+https://github.com/rust-lang/crates.io-index", "req": "^0.4", "kind": null, "rename": null, "optional": false, "uses_default_features": true, "features": [], "target": null, "registry": null},
+            {"name": "itoa", "source": "registry+https://github.com/rust-lang/crates.io-index", "req": "^1.0", "kind": "dev", "rename": null, "optional": false, "uses_default_features": true, "features": [], "target": null, "registry": null}
+          ],
+          "targets": [
+            {"kind": ["lib"], "crate_types": ["lib"], "name": "dv_root", "src_path": "/w/dv/src/lib.rs", "edition": "2021", "doc": true, "doctest": true, "test": true}
+          ],
+          "features": {},
+          "manifest_path": "/w/dv/Cargo.toml",
+          "edition": "2021"
+        }
+      ],
+      "workspace_members": ["path+file:///w/dv#dv-root@0.1.0"],
+      "workspace_default_members": ["path+file:///w/dv#dv-root@0.1.0"],
+      "resolve": {
+        "nodes": [
+          {"id": "registry+https://github.com/rust-lang/crates.io-index#itoa@0.4.8", "dependencies": [], "deps": [], "features": []},
+          {"id": "registry+https://github.com/rust-lang/crates.io-index#itoa@1.0.18", "dependencies": [], "deps": [], "features": []},
+          {
+            "id": "path+file:///w/dv#dv-root@0.1.0",
+            "dependencies": [
+              "registry+https://github.com/rust-lang/crates.io-index#itoa@0.4.8",
+              "registry+https://github.com/rust-lang/crates.io-index#itoa@1.0.18"
+            ],
+            "deps": [
+              {
+                "name": "itoa",
+                "pkg": "registry+https://github.com/rust-lang/crates.io-index#itoa@0.4.8",
+                "dep_kinds": [{"kind": null, "target": null}]
+              },
+              {
+                "name": "itoa",
+                "pkg": "registry+https://github.com/rust-lang/crates.io-index#itoa@1.0.18",
+                "dep_kinds": [{"kind": "dev", "target": null}]
+              }
+            ],
+            "features": []
+          }
+        ],
+        "root": "path+file:///w/dv#dv-root@0.1.0"
+      },
+      "target_directory": "/w/dv/target",
+      "version": 1,
+      "workspace_root": "/w/dv",
+      "metadata": null
+    }"#;
+
+    #[test]
+    fn build_resolved_versions_keeps_divergent_versions_separate_per_kind() {
+        // Two edges, one name, two semver-incompatible resolutions. Both maps are
+        // keyed by kind precisely so each kind keeps exactly one answer; drop the
+        // kind from either key and `by_dep_name` goes last-write-wins while
+        // `by_package_name` poisons itself and reports `ambiguous_resolve`.
+        let versions = resolved_versions_from_metadata(DIVERGENT_KIND_METADATA);
+        assert_eq!(
+            versions.len(),
+            1,
+            "the fixture declares one workspace member"
+        );
+        let member = &versions[0];
+        assert_eq!(member.member, "dv-root");
+
+        let normal = Version::new(0, 4, 8);
+        let dev = Version::new(1, 0, 18);
+
+        assert_eq!(
+            member.dep_version("itoa", DependencyType::Normal),
+            Some(&normal)
+        );
+        assert_eq!(member.dep_version("itoa", DependencyType::Dev), Some(&dev));
+        assert_eq!(
+            member.package_version("itoa", DependencyType::Normal),
+            Some(&normal)
+        );
+        assert_eq!(
+            member.package_version("itoa", DependencyType::Dev),
+            Some(&dev)
+        );
+        assert!(!member.is_ambiguous_package_name("itoa", DependencyType::Normal));
+        assert!(!member.is_ambiguous_package_name("itoa", DependencyType::Dev));
     }
 
     #[test]
