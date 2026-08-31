@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.3.11] - 2026-08-31
+
+### Bug Fixes
+
+- **analyzers:** Match unknown-flag wording per line
 ## [0.3.10] - 2026-08-31
 
 ### Bug Fixes
