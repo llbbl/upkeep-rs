@@ -104,6 +104,7 @@ vulnerabilities and do not change the vulnerability summary or `quality` grade.
 
 - [docs/installation.md](./docs/installation.md): crates.io, `cargo-binstall`, install script, and source installs
 - [docs/commands.md](./docs/commands.md): full command reference plus canonical JSON examples for every subcommand
+- [docs/python-schema.md](./docs/python-schema.md): the versioned output contract and exit codes for `cargo upkeep python`
 - [docs/spec.md](./docs/spec.md): CLI contract, comparison with the underlying tools, rate limiting, and test-tooling notes
 - [docs/releasing.md](./docs/releasing.md): automated releases, conventional commits, and the pre-1.0 version policy
 

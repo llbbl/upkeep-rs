@@ -1,0 +1,288 @@
+{
+  "schema": {
+    "version": "preview"
+  },
+  "workspace_root": "/workspace/demo",
+  "workspace": {
+    "path": "/workspace/demo",
+    "id": "workspace+/workspace/demo"
+  },
+  "roots": [
+    {
+      "id": "demo-app:dev==0.1.0@editable+/workspace/demo/"
+    },
+    {
+      "id": "demo-app==0.1.0@editable+/workspace/demo/"
+    },
+    {
+      "id": "demo-app[extra-feature]==0.1.0@editable+/workspace/demo/"
+    }
+  ],
+  "inverted": false,
+  "members": [
+    {
+      "name": "demo-app",
+      "path": "/workspace/demo/",
+      "id": "demo-app==0.1.0@editable+/workspace/demo/"
+    }
+  ],
+  "resolution": {
+    "certifi==2026.7.22@registry+https://pypi.org/simple": {
+      "name": "certifi",
+      "version": "2026.7.22",
+      "source": {
+        "registry": {
+          "url": "https://pypi.org/simple"
+        }
+      },
+      "kind": "package",
+      "dependencies": []
+    },
+    "chardet==3.0.4@registry+https://pypi.org/simple": {
+      "name": "chardet",
+      "version": "3.0.4",
+      "source": {
+        "registry": {
+          "url": "https://pypi.org/simple"
+        }
+      },
+      "kind": "package",
+      "dependencies": [],
+      "latest_version": "7.6.0"
+    },
+    "click==7.0@registry+https://pypi.org/simple": {
+      "name": "click",
+      "version": "7.0",
+      "source": {
+        "registry": {
+          "url": "https://pypi.org/simple"
+        }
+      },
+      "kind": "package",
+      "dependencies": [],
+      "latest_version": "8.5.0"
+    },
+    "idna==2.7@registry+https://pypi.org/simple": {
+      "name": "idna",
+      "version": "2.7",
+      "source": {
+        "registry": {
+          "url": "https://pypi.org/simple"
+        }
+      },
+      "kind": "package",
+      "dependencies": [],
+      "latest_version": "3.19"
+    },
+    "jinja2==2.11.2@registry+https://pypi.org/simple": {
+      "name": "jinja2",
+      "version": "2.11.2",
+      "source": {
+        "registry": {
+          "url": "https://pypi.org/simple"
+        }
+      },
+      "kind": "package",
+      "dependencies": [
+        {
+          "id": "markupsafe==1.1.1@registry+https://pypi.org/simple"
+        }
+      ],
+      "latest_version": "3.1.6"
+    },
+    "markupsafe==1.1.1@registry+https://pypi.org/simple": {
+      "name": "markupsafe",
+      "version": "1.1.1",
+      "source": {
+        "registry": {
+          "url": "https://pypi.org/simple"
+        }
+      },
+      "kind": "package",
+      "dependencies": [],
+      "latest_version": "3.0.3"
+    },
+    "packaging==21.0@registry+https://pypi.org/simple": {
+      "name": "packaging",
+      "version": "21.0",
+      "source": {
+        "registry": {
+          "url": "https://pypi.org/simple"
+        }
+      },
+      "kind": "package",
+      "dependencies": [
+        {
+          "id": "pyparsing==3.3.2@registry+https://pypi.org/simple"
+        }
+      ],
+      "latest_version": "26.3"
+    },
+    "pyparsing==3.3.2@registry+https://pypi.org/simple": {
+      "name": "pyparsing",
+      "version": "3.3.2",
+      "source": {
+        "registry": {
+          "url": "https://pypi.org/simple"
+        }
+      },
+      "kind": "package",
+      "dependencies": []
+    },
+    "pysocks==1.7.1@registry+https://pypi.org/simple": {
+      "name": "pysocks",
+      "version": "1.7.1",
+      "source": {
+        "registry": {
+          "url": "https://pypi.org/simple"
+        }
+      },
+      "kind": "package",
+      "dependencies": []
+    },
+    "pyyaml==5.3@registry+https://pypi.org/simple": {
+      "name": "pyyaml",
+      "version": "5.3",
+      "source": {
+        "registry": {
+          "url": "https://pypi.org/simple"
+        }
+      },
+      "kind": "package",
+      "dependencies": [],
+      "latest_version": "6.0.3"
+    },
+    "requests==2.19.1@registry+https://pypi.org/simple": {
+      "name": "requests",
+      "version": "2.19.1",
+      "source": {
+        "registry": {
+          "url": "https://pypi.org/simple"
+        }
+      },
+      "kind": "package",
+      "dependencies": [
+        {
+          "id": "certifi==2026.7.22@registry+https://pypi.org/simple"
+        },
+        {
+          "id": "chardet==3.0.4@registry+https://pypi.org/simple"
+        },
+        {
+          "id": "idna==2.7@registry+https://pypi.org/simple"
+        },
+        {
+          "id": "urllib3==1.23@registry+https://pypi.org/simple"
+        }
+      ],
+      "optional_dependencies": [
+        {
+          "name": "socks",
+          "id": "requests[socks]==2.19.1@registry+https://pypi.org/simple"
+        }
+      ],
+      "latest_version": "2.34.2"
+    },
+    "requests[socks]==2.19.1@registry+https://pypi.org/simple": {
+      "name": "requests",
+      "version": "2.19.1",
+      "source": {
+        "registry": {
+          "url": "https://pypi.org/simple"
+        }
+      },
+      "kind": {
+        "extra": "socks"
+      },
+      "dependencies": [
+        {
+          "id": "pysocks==1.7.1@registry+https://pypi.org/simple"
+        },
+        {
+          "id": "requests==2.19.1@registry+https://pypi.org/simple"
+        }
+      ]
+    },
+    "demo-app:dev==0.1.0@editable+/workspace/demo/": {
+      "name": "demo-app",
+      "version": "0.1.0",
+      "source": {
+        "editable": "/workspace/demo/"
+      },
+      "kind": {
+        "group": "dev"
+      },
+      "dependencies": [
+        {
+          "id": "click==7.0@registry+https://pypi.org/simple"
+        }
+      ]
+    },
+    "demo-app==0.1.0@editable+/workspace/demo/": {
+      "name": "demo-app",
+      "version": "0.1.0",
+      "source": {
+        "editable": "/workspace/demo/"
+      },
+      "kind": "package",
+      "dependencies": [
+        {
+          "id": "jinja2==2.11.2@registry+https://pypi.org/simple"
+        },
+        {
+          "id": "pyyaml==5.3@registry+https://pypi.org/simple"
+        },
+        {
+          "id": "requests[socks]==2.19.1@registry+https://pypi.org/simple"
+        }
+      ],
+      "optional_dependencies": [
+        {
+          "name": "extra-feature",
+          "id": "demo-app[extra-feature]==0.1.0@editable+/workspace/demo/"
+        }
+      ],
+      "dependency_groups": [
+        {
+          "name": "dev",
+          "id": "demo-app:dev==0.1.0@editable+/workspace/demo/"
+        }
+      ]
+    },
+    "demo-app[extra-feature]==0.1.0@editable+/workspace/demo/": {
+      "name": "demo-app",
+      "version": "0.1.0",
+      "source": {
+        "editable": "/workspace/demo/"
+      },
+      "kind": {
+        "extra": "extra-feature"
+      },
+      "dependencies": [
+        {
+          "id": "packaging==21.0@registry+https://pypi.org/simple"
+        },
+        {
+          "id": "demo-app==0.1.0@editable+/workspace/demo/"
+        }
+      ]
+    },
+    "urllib3==1.23@registry+https://pypi.org/simple": {
+      "name": "urllib3",
+      "version": "1.23",
+      "source": {
+        "registry": {
+          "url": "https://pypi.org/simple"
+        }
+      },
+      "kind": "package",
+      "dependencies": [],
+      "latest_version": "2.7.0"
+    },
+    "workspace+/workspace/demo": {
+      "kind": "workspace",
+      "path": "/workspace/demo",
+      "dependencies": []
+    }
+  }
+}

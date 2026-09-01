@@ -5,5 +5,6 @@ pub mod analyzers;
 pub mod doc_examples;
 pub mod error;
 pub mod output;
+pub mod pep440;
 pub mod python;
 pub mod scorers;

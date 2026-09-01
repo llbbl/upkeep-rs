@@ -50,6 +50,12 @@ pub enum ErrorCode {
     /// behind. Distinct from the codes above: nothing failed to *execute*, so
     /// the command's normal output is still valid and still printed.
     IncompleteAnalysis,
+    /// An analysis ran, measured what it set out to, and an opt-in gate rejected
+    /// the result. Deliberately distinct from [`ErrorCode::IncompleteAnalysis`]:
+    /// that one says the run could not see enough, this one says the run saw
+    /// plenty and the caller asked to fail on it. A consumer that cannot tell
+    /// them apart cannot tell "install the scanner" from "fix the finding".
+    PolicyViolation,
     /// Reserved for unexpected internal errors. Currently unused but kept
     /// for future error handling needs.
     #[allow(dead_code)]
@@ -180,6 +186,7 @@ impl fmt::Display for ErrorCode {
             ErrorCode::Config => "config",
             ErrorCode::Concurrency => "concurrency",
             ErrorCode::IncompleteAnalysis => "incomplete_analysis",
+            ErrorCode::PolicyViolation => "policy_violation",
             ErrorCode::Internal => "internal",
         };
         write!(f, "{label}")

@@ -316,13 +316,36 @@ tagged:
 | `latest` | The newest version the source offers. |
 | `update_type` | See [Update classification](#update-classification). |
 | `scope` | `direct`, `transitive`, or `unknown`. |
-| `groups` | Dependency groups this package belongs to. |
+| `groups` | The sections that reach this package — base dependencies, PEP 735 groups, and project extras alike. See the note below on why this is broader than its name. |
 | `extras` | Extras this package was pulled in with. |
 | `marker` | PEP 508 environment marker. |
 
 `scope` has an explicit `unknown` because several sources genuinely do not say.
 An entry that cannot be established as direct must not be recorded as
-transitive, or as direct, just to fill the field.
+transitive, or as direct, just to fill the field. A package that is *both* —
+declared directly and reached again through something else — is `direct`, which
+is the actionable half; there is no way to say "both" and inventing one would
+change the field's meaning for everybody.
+
+`groups` names the *sections* of the project a package is reachable from, not
+only its PEP 735 dependency groups. The documented example already shows `main`,
+which is not a dependency group either but `[project.dependencies]`. A project
+extra is the third kind, and it goes in the same list: `uv` models all three as
+parallel, separately selectable parts of one workspace member — `--only-group`
+and `--no-extra` sit beside each other in `uv audit --help` — and the alternative
+was reporting `groups: []` for a dependency the project genuinely declares, which
+reads as "belongs to nothing". That is the "unmeasured looks like none" mistake
+this schema exists to prevent. A name collision between an extra and a group is
+possible in principle and is not disambiguated; `uv` gives them one namespace on
+the command line too.
+
+Because of that, an extra name can appear in **either** field on the same entry,
+meaning different things, and the two must not be conflated. `extras` names the
+extras activated *on this package* — `requests` carrying `["socks"]` means
+`requests[socks]` was resolved. `groups` may name a *project* extra — a package
+carrying `["extra-feature"]` means the project's own `[project.optional-dependencies].extra-feature`
+section is what reaches it. One describes the package, the other describes the
+route to it.
 
 `checked` counts the distinct packages the freshness question was actually
 settled for, and it is the denominator. It is not a count of declarations, and

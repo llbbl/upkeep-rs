@@ -1,0 +1,135 @@
+{
+  "schema": {
+    "version": "preview"
+  },
+  "summary": {
+    "audited_packages": 13,
+    "vulnerabilities": 6,
+    "adverse_statuses": 0
+  },
+  "vulnerabilities": [
+    {
+      "dependency": {
+        "name": "click",
+        "version": "7.0"
+      },
+      "id": "PYSEC-2026-2132",
+      "display_id": "PYSEC-2026-2132",
+      "aliases": [
+        "CVE-2026-7246",
+        "GHSA-47fr-3ffg-hgmw"
+      ],
+      "summary": null,
+      "description": "Pallets Click, versions 8.3.2 and below, contain a command injection vulnerability in the click.edit() function, allowin",
+      "link": "https://access.redhat.com/errata/RHSA-2026:24761",
+      "fix_versions": [
+        "8.3.3"
+      ],
+      "published": "2026-04-30T14:16:36.433Z",
+      "modified": "2026-07-13T07:15:21.899333658Z"
+    },
+    {
+      "dependency": {
+        "name": "idna",
+        "version": "2.7"
+      },
+      "id": "GHSA-65pc-fj4g-8rjx",
+      "display_id": "GHSA-65pc-fj4g-8rjx",
+      "aliases": [
+        "CVE-2026-45409",
+        "PYSEC-2026-215"
+      ],
+      "summary": "Internationalized Domain Names in Applications (IDNA): Specially crafted inputs to idna.encode() can bypass CVE-2024-3651 fix",
+      "description": "This is the same issue as CVE-2024-3651, however the original remediation in 2024 was not a complete fix. Payloads such ",
+      "link": "https://nvd.nist.gov/vuln/detail/CVE-2026-45409",
+      "fix_versions": [
+        "3.15"
+      ],
+      "published": "2026-05-19T14:34:32Z",
+      "modified": "2026-07-08T17:45:15.021597323Z"
+    },
+    {
+      "dependency": {
+        "name": "jinja2",
+        "version": "2.11.2"
+      },
+      "id": "GHSA-g3rq-g295-4j3m",
+      "display_id": "GHSA-g3rq-g295-4j3m",
+      "aliases": [
+        "CVE-2020-28493",
+        "PYSEC-2021-66",
+        "SNYK-PYTHON-JINJA2-1012994"
+      ],
+      "summary": "Regular Expression Denial of Service (ReDoS) in Jinja2",
+      "description": "This affects the package jinja2 from 0.0.0 and before 2.11.3. The ReDOS vulnerability of the regex is mainly due to the ",
+      "link": "https://nvd.nist.gov/vuln/detail/CVE-2020-28493",
+      "fix_versions": [
+        "2.11.3"
+      ],
+      "published": "2021-03-19T21:28:05Z",
+      "modified": "2025-02-14T05:26:14.56516Z"
+    },
+    {
+      "dependency": {
+        "name": "pyyaml",
+        "version": "5.3"
+      },
+      "id": "PYSEC-2020-96",
+      "display_id": "PYSEC-2020-96",
+      "aliases": [
+        "CVE-2020-1747",
+        "GHSA-6757-jp84-gxfx"
+      ],
+      "summary": null,
+      "description": "A vulnerability was discovered in the PyYAML library in versions before 5.3.1, where it is susceptible to arbitrary code",
+      "link": "https://github.com/advisories/GHSA-6757-jp84-gxfx",
+      "fix_versions": [
+        "5.3.1"
+      ],
+      "published": "2020-03-24T15:15:00Z",
+      "modified": "2026-05-04T08:57:14.897560893Z"
+    },
+    {
+      "dependency": {
+        "name": "requests",
+        "version": "2.19.1"
+      },
+      "id": "GHSA-x84v-xcm2-53pg",
+      "display_id": "GHSA-x84v-xcm2-53pg",
+      "aliases": [
+        "CVE-2018-18074",
+        "PYSEC-2018-28"
+      ],
+      "summary": "Insufficiently Protected Credentials in Requests",
+      "description": "The Requests package through 2.19.1 before 2018-09-14 for Python sends an HTTP Authorization header to an http URI upon ",
+      "link": "https://nvd.nist.gov/vuln/detail/CVE-2018-18074",
+      "fix_versions": [
+        "2.20.0"
+      ],
+      "published": "2018-10-29T19:06:46Z",
+      "modified": "2024-10-21T21:42:55.896669Z"
+    },
+    {
+      "dependency": {
+        "name": "urllib3",
+        "version": "1.23"
+      },
+      "id": "GHSA-34jh-p97f-mpxf",
+      "display_id": "GHSA-34jh-p97f-mpxf",
+      "aliases": [
+        "CVE-2024-37891",
+        "PYSEC-2026-1995"
+      ],
+      "summary": "urllib3's Proxy-Authorization request header isn't stripped during cross-origin redirects",
+      "description": "When using urllib3's proxy support with `ProxyManager`, the `Proxy-Authorization` header is only sent to the configured ",
+      "link": "https://nvd.nist.gov/vuln/detail/CVE-2024-37891",
+      "fix_versions": [
+        "1.26.19",
+        "2.2.2"
+      ],
+      "published": "2024-06-17T21:37:20Z",
+      "modified": "2026-07-07T17:56:53.715123733Z"
+    }
+  ],
+  "adverse_statuses": []
+}
