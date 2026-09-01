@@ -18,7 +18,7 @@ Every command accepts:
 | `1` | The command failed, or `quality` rejected its own result. Stdout is empty except in the `quality` cases below, which print the full report first. The diagnostic goes to stderr either way, as a JSON error object under `--json` and as a plain line otherwise. |
 | `2` | The arguments were rejected. Usage goes to stderr. |
 
-Findings are not failures. `audit` exits 0 with vulnerabilities in its report, `deps` exits 0 with outdated crates, and `unused` exits 0 with unused dependencies. Every command works this way, and `quality` is the only one that adds anything to it.
+Findings are not failures. `audit` exits 0 with vulnerabilities in its report, `deps` exits 0 with outdated crates, and `unused` exits 0 with unused dependencies. Every command works this way, and `quality` and `python` are the only ones that add anything to it — both by opt-in flag, and both printing the full report before the nonzero status.
 
 ### `quality`
 
@@ -490,4 +490,44 @@ cargo install cargo-geiger
     }
   ]
 }
+```
+
+## python
+
+Report outdated and vulnerable **Python** dependencies, normalized from `uv`.
+
+```bash
+cargo upkeep python --json
+```
+
+The payload, every field's meaning, the classification rules, and the exit
+contract live in [python-schema.md](./python-schema.md) — that page is the
+contract, and this section only says what is different from the Rust commands.
+
+Three things are worth knowing before you gate on it.
+
+**Capabilities are probed, not inferred.** `uv` gained `audit` around 0.10.10,
+its JSON output in 0.11.15, and `uv tree --format json` appears in no release
+note at all, so this command asks the installed `uv` what it accepts rather than
+reading its version number. A capability that cannot answer becomes an
+`unavailable[]` entry with a `null` report and an upgrade hint. It never becomes
+a clean result.
+
+**`uv audit` publishes no severity.** Every finding is therefore `unknown`, and
+an `unknown` severity satisfies every `--fail-on-vulnerability` threshold — so
+`--fail-on-vulnerability critical` currently fails on any finding at all. That is
+deliberate: a severity that was never established cannot be shown to be below the
+bar. Gate on the parsed `summary.unknown` bucket if you want a different rule.
+
+**Only read-only `uv` invocations are used** — `uv tree --outdated --frozen` and
+`uv audit --frozen`. Nothing here locks, syncs, or edits the project, and a
+project with no `uv.lock` fails with uv's own message rather than creating one.
+
+```bash
+# Coverage gate. Name the capabilities in CI: the bare form means "every
+# capability this version knows about", a set that can grow between releases.
+cargo upkeep python --require-complete=outdated,security
+
+# Findings gate.
+cargo upkeep python --fail-on-vulnerability high
 ```

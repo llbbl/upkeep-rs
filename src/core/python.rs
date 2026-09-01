@@ -27,17 +27,58 @@
 //! told apart from a key a future version stopped emitting, so the `null` is
 //! always written.
 //!
+//! # Members with no production caller yet
+//!
+//! The module-wide `#![allow(dead_code)]` this file carried until the first
+//! adapter landed is gone. What replaced it is a handful of `#[allow(dead_code)]`
+//! attributes on individual enum variants, each saying which source will fill it.
+//! The distinction matters: the blanket allow silenced *everything*, so a type
+//! added later and never wired up looked exactly like one deliberately waiting.
+//!
+//! Two groups remain, and both are the schema being wider than any single
+//! manager rather than the schema having a useless field:
+//!
+//! - `PythonManagerName::{Poetry, PipTools}` and
+//!   `PythonUnavailableReason::Unsupported` wait on the Poetry and pip-tools
+//!   adapters (#73). `Unsupported` is the reason those adapters exist to report:
+//!   Poetry does not scan for vulnerabilities and no install changes that, which
+//!   is a different fact from `uv audit` being absent.
+//! - `PythonSeverity::{High, Moderate, Low}` and `PythonMarker::{Absent,
+//!   Reported}` are things `uv` does not report. `uv audit` publishes no severity
+//!   at all, so every finding it produces is `Unknown`; `uv tree` attaches an
+//!   environment marker to a dependency *edge* and only under `--universal`, so
+//!   this adapter reports `NotReported`. Removing either group would delete the
+//!   vocabulary that makes those absences legible.
+//!
 //! [`docs/python-schema.md`]: https://github.com/llbbl/upkeep-rs/blob/main/docs/python-schema.md
 
-// Every item below is constructed only from `#[cfg(test)]` code until the first
-// adapter lands (#71). `cargo clippy --all-targets` also compiles the binary
-// *without* `cfg(test)`, where these are genuinely dead, and `-D warnings` makes
-// that a hard failure. `ErrorCode::Internal` in `crate::core::error` carries the
-// same allow for the same reason. Remove this attribute with #71, which gives
-// every type a production caller.
-#![allow(dead_code)]
-
 use serde::Serialize;
+use std::fmt;
+
+/// Normalizes a package name per PEP 503: lowercase, with runs of `-`, `_`, and
+/// `.` collapsed to a single `-`.
+///
+/// Applied on every name entering the payload, from every source. `uv tree` and
+/// `uv audit` are separate commands reading separate data, so a finding is joined
+/// to its package by normalized name — a join on the raw spelling would silently
+/// miss `Zope.Interface` against `zope_interface` and report a scope of `unknown`
+/// for a package the graph knew all about.
+pub fn normalize_package_name(name: &str) -> String {
+    let mut normalized = String::with_capacity(name.len());
+    let mut previous_was_separator = false;
+    for character in name.chars() {
+        if matches!(character, '-' | '_' | '.') {
+            if !previous_was_separator {
+                normalized.push('-');
+            }
+            previous_was_separator = true;
+        } else {
+            normalized.extend(character.to_lowercase());
+            previous_was_separator = false;
+        }
+    }
+    normalized
+}
 
 /// The version of the Python maintenance contract this crate emits.
 ///
@@ -101,7 +142,11 @@ pub struct PythonManager {
 #[serde(rename_all = "snake_case")]
 pub enum PythonManagerName {
     Uv,
+    /// Awaits the Poetry adapter (#73).
+    #[allow(dead_code)]
     Poetry,
+    /// Awaits the pip-tools adapter (#73).
+    #[allow(dead_code)]
     PipTools,
 }
 
@@ -153,6 +198,11 @@ pub enum PythonUnavailableReason {
     Failed,
     /// The detected manager cannot answer this at all. A different tool is
     /// needed; installing something is not the fix.
+    ///
+    /// No `uv` gap is this: every one of them — a missing `audit` subcommand, a
+    /// `--output-format` without `json` — is fixed by upgrading uv, which is
+    /// `NotInstalled`. This is Poetry's case, and it lands with #73.
+    #[allow(dead_code)]
     Unsupported,
 }
 
@@ -320,8 +370,17 @@ pub struct PythonVulnerability {
 #[serde(rename_all = "snake_case")]
 pub enum PythonSeverity {
     Critical,
+    // The four graded severities have no `uv` caller: `uv audit` publishes no
+    // severity for any finding, so every one it produces is `Unknown`. They stay
+    // because a future source that does grade its advisories has to be able to
+    // say so, and because deleting them would leave `Unknown` with nothing to
+    // contrast against. `Critical` escapes the attribute only because the
+    // threshold table in `cli::commands::python` names it.
+    #[allow(dead_code)]
     High,
+    #[allow(dead_code)]
     Moderate,
+    #[allow(dead_code)]
     Low,
     /// The source established no severity for this finding. Under
     /// `--fail-on-vulnerability` this satisfies every threshold: a severity that
@@ -343,8 +402,193 @@ pub enum PythonMarker {
     /// The source does not report markers at all.
     NotReported,
     /// The source reports markers and this dependency has none.
+    ///
+    /// Unfilled by the `uv` adapter, which reports `NotReported` for every
+    /// package: uv attaches a marker to a dependency *edge* and only under
+    /// `--universal`, a mode that also changes which packages are in the report.
+    /// A source that reports markers per package will fill this.
+    #[allow(dead_code)]
     Absent,
+    #[allow(dead_code)]
     Reported(String),
+}
+
+/// The human-readable rendering, for callers who did not ask for `--json`.
+///
+/// Every claim the JSON makes has to survive the trip to text, so an unmeasured
+/// capability is printed as an explicit "not measured" line with its reason. The
+/// text form omitting what the JSON says is how a CI author reading their
+/// terminal ends up believing a partial run was a clean one.
+impl fmt::Display for PythonOutput {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(
+            f,
+            "Manager: {} {}",
+            self.manager.name,
+            self.manager
+                .version
+                .as_deref()
+                .unwrap_or("(unknown version)")
+        )?;
+        writeln!(
+            f,
+            "Coverage: {}",
+            if self.complete {
+                "complete".to_string()
+            } else {
+                format!(
+                    "incomplete ({} of {} capabilities measured)",
+                    self.capabilities
+                        .iter()
+                        .filter(|capability| capability.measured)
+                        .count(),
+                    self.capabilities.len()
+                )
+            }
+        )?;
+
+        for gap in &self.unavailable {
+            writeln!(
+                f,
+                "  {} not measured ({}): {}",
+                gap.name, gap.reason, gap.detail
+            )?;
+        }
+
+        match &self.outdated {
+            Some(report) => {
+                writeln!(
+                    f,
+                    "\nOutdated: {} of {} checked",
+                    report.outdated, report.checked
+                )?;
+                if report.outdated > 0 {
+                    let counts = &report.counts;
+                    writeln!(
+                        f,
+                        "  epoch {} | major {} | minor {} | patch {} | qualifier {} | unclassified {}",
+                        counts.epoch,
+                        counts.major,
+                        counts.minor,
+                        counts.patch,
+                        counts.qualifier,
+                        counts.unclassified
+                    )?;
+                }
+                for package in &report.packages {
+                    writeln!(
+                        f,
+                        "  {} {} -> {} ({}, {})",
+                        package.name,
+                        package.current,
+                        package.latest,
+                        package.update_type,
+                        package.scope
+                    )?;
+                }
+            }
+            None => writeln!(f, "\nOutdated: not measured")?,
+        }
+
+        match &self.security {
+            Some(report) => {
+                let summary = &report.summary;
+                writeln!(f, "\nVulnerabilities: {}", summary.total)?;
+                if summary.total > 0 {
+                    writeln!(
+                        f,
+                        "  critical {} | high {} | moderate {} | low {} | unknown {}",
+                        summary.critical,
+                        summary.high,
+                        summary.moderate,
+                        summary.low,
+                        summary.unknown
+                    )?;
+                }
+                for finding in &report.findings {
+                    writeln!(
+                        f,
+                        "  [{}] {} {} — {}",
+                        finding.severity,
+                        finding.package,
+                        finding.installed_version,
+                        finding.title.as_deref().unwrap_or(finding.id.as_str())
+                    )?;
+                }
+            }
+            None => writeln!(f, "\nVulnerabilities: not measured")?,
+        }
+
+        for warning in &self.warnings {
+            writeln!(f, "\nwarning: {warning}")?;
+        }
+
+        Ok(())
+    }
+}
+
+impl fmt::Display for PythonManagerName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            PythonManagerName::Uv => "uv",
+            PythonManagerName::Poetry => "poetry",
+            PythonManagerName::PipTools => "pip-tools",
+        })
+    }
+}
+
+impl fmt::Display for PythonCapability {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            PythonCapability::Outdated => "outdated",
+            PythonCapability::Security => "security",
+        })
+    }
+}
+
+impl fmt::Display for PythonUnavailableReason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            PythonUnavailableReason::NotInstalled => "not_installed",
+            PythonUnavailableReason::Failed => "failed",
+            PythonUnavailableReason::Unsupported => "unsupported",
+        })
+    }
+}
+
+impl fmt::Display for PythonUpdateType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            PythonUpdateType::Epoch => "epoch",
+            PythonUpdateType::Major => "major",
+            PythonUpdateType::Minor => "minor",
+            PythonUpdateType::Patch => "patch",
+            PythonUpdateType::Qualifier => "qualifier",
+            PythonUpdateType::Unclassified => "unclassified",
+        })
+    }
+}
+
+impl fmt::Display for PythonDependencyScope {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            PythonDependencyScope::Direct => "direct",
+            PythonDependencyScope::Transitive => "transitive",
+            PythonDependencyScope::Unknown => "unknown",
+        })
+    }
+}
+
+impl fmt::Display for PythonSeverity {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            PythonSeverity::Critical => "critical",
+            PythonSeverity::High => "high",
+            PythonSeverity::Moderate => "moderate",
+            PythonSeverity::Low => "low",
+            PythonSeverity::Unknown => "unknown",
+        })
+    }
 }
 
 #[cfg(test)]

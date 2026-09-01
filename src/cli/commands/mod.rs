@@ -3,6 +3,7 @@
 mod audit;
 mod deps;
 mod detect;
+mod python;
 mod quality;
 mod run_with;
 mod tree;
@@ -38,6 +39,7 @@ pub async fn handle(command: UpkeepCommand, json: bool) -> Result<()> {
         UpkeepCommand::Unused => unused::run(json).await,
         UpkeepCommand::UnsafeCode => unsafe_code::run(json).await,
         UpkeepCommand::Tree(args) => tree::run(json, args).await,
+        UpkeepCommand::Python(args) => python::run(json, args).await,
     }
 }
 

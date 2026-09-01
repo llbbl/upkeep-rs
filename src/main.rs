@@ -26,6 +26,7 @@ async fn main() -> ExitCode {
         cli::Command::Unused => cli::UpkeepCommand::Unused,
         cli::Command::UnsafeCode => cli::UpkeepCommand::UnsafeCode,
         cli::Command::Tree(args) => cli::UpkeepCommand::Tree(args),
+        cli::Command::Python(args) => cli::UpkeepCommand::Python(args),
     };
 
     match cli::commands::handle(command, cli.json).await {
