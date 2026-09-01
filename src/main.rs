@@ -20,7 +20,9 @@ async fn main() -> ExitCode {
         cli::Command::Detect => cli::UpkeepCommand::Detect,
         cli::Command::Audit => cli::UpkeepCommand::Audit,
         cli::Command::Deps { security } => cli::UpkeepCommand::Deps { security },
-        cli::Command::Quality => cli::UpkeepCommand::Quality,
+        cli::Command::Quality { require_complete } => {
+            cli::UpkeepCommand::Quality { require_complete }
+        }
         cli::Command::Unused => cli::UpkeepCommand::Unused,
         cli::Command::UnsafeCode => cli::UpkeepCommand::UnsafeCode,
         cli::Command::Tree(args) => cli::UpkeepCommand::Tree(args),

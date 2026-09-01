@@ -34,7 +34,7 @@ pub async fn handle(command: UpkeepCommand, json: bool) -> Result<()> {
             })?,
         UpkeepCommand::Audit => audit::run(json).await,
         UpkeepCommand::Deps { security } => deps::run(json, security).await,
-        UpkeepCommand::Quality => quality::run(json).await,
+        UpkeepCommand::Quality { require_complete } => quality::run(json, require_complete).await,
         UpkeepCommand::Unused => unused::run(json).await,
         UpkeepCommand::UnsafeCode => unsafe_code::run(json).await,
         UpkeepCommand::Tree(args) => tree::run(json, args).await,
