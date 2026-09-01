@@ -15,7 +15,9 @@
 
 use crate::cli::{CapabilityArg, PythonArgs, ThresholdArg};
 use crate::core::analyzers::poetry::{Poetry, SECURITY_UNSUPPORTED_DETAIL};
-use crate::core::analyzers::python_manager::{self, Capability};
+use crate::core::analyzers::python_manager::{
+    self, Capability, REQUIREMENTS_OUTDATED_DETAIL, REQUIREMENTS_SECURITY_DETAIL,
+};
 use crate::core::analyzers::uv::{ScopeIndex, Uv};
 use crate::core::error::{ErrorCode, Result, UpkeepError};
 use crate::core::output::print_json;
@@ -65,8 +67,8 @@ pub async fn run(json: bool, args: PythonArgs) -> Result<()> {
         UpkeepError::message(
             ErrorCode::InvalidData,
             format!(
-                "no supported Python manager could be detected: no pyproject.toml, uv.lock, or \
-                 poetry.lock in {} or any parent directory",
+                "no supported Python manager could be detected: no pyproject.toml, uv.lock, \
+                 poetry.lock, requirements.txt, or requirements.in in {} or any parent directory",
                 working_directory.display()
             ),
         )
@@ -76,9 +78,12 @@ pub async fn run(json: bool, args: PythonArgs) -> Result<()> {
         PythonManagerName::Poetry => {
             build_poetry_output(&Poetry::detect(project.root).await?).await
         }
-        // pip-tools has no adapter (#76), so it is never a detection outcome.
-        PythonManagerName::Uv | PythonManagerName::PipTools => {
-            build_uv_output(&Uv::detect(project.root).await?).await
+        PythonManagerName::Uv => build_uv_output(&Uv::detect(project.root).await?).await,
+        // No tool is located and none is run: there is nothing to locate. Both
+        // variants take the same path, and `manager` is carried through so the
+        // payload names the one that was actually detected.
+        manager @ (PythonManagerName::Pip | PythonManagerName::PipTools) => {
+            build_requirements_output(manager)
         }
     };
 
@@ -234,6 +239,59 @@ async fn build_poetry_output(poetry: &Poetry) -> PythonOutput {
         outdated,
         security: None,
         warnings,
+    }
+}
+
+/// Reports a requirements-file project, having run nothing.
+///
+/// The third builder, and the one with no adapter behind it. pip-tools is a
+/// lockfile compiler and plain pip is an installer; neither exposes an outdated
+/// command, an audit command, or any query interface at all, so there is no tool
+/// output to normalize and #76 settled that this crate will not synthesize one.
+/// No subprocess runs on this path and nothing reaches the network.
+///
+/// So both capabilities are [`PythonUnavailableReason::Unsupported`], both
+/// reports are `null`, and `manager.version` is `None` — there is no tool whose
+/// version could be reported. The value over the previous behaviour is that this
+/// is a real `PythonOutput` carrying `schema_version`, rather than the error
+/// object a consumer got when detection found nothing at all.
+///
+/// The nonzero exit falls out of [`enforce_exit_policy`]'s existing every-
+/// capability-unavailable rule with no special case, which is the point: this is
+/// the documented contract already, reached by a new route.
+fn build_requirements_output(manager: PythonManagerName) -> PythonOutput {
+    let unavailable = vec![
+        gap(
+            PythonCapability::Outdated,
+            PythonUnavailableReason::Unsupported,
+            REQUIREMENTS_OUTDATED_DETAIL.to_string(),
+        ),
+        gap(
+            PythonCapability::Security,
+            PythonUnavailableReason::Unsupported,
+            REQUIREMENTS_SECURITY_DETAIL.to_string(),
+        ),
+    ];
+    let capabilities = coverage(&unavailable);
+
+    PythonOutput {
+        schema_version: PYTHON_SCHEMA_VERSION,
+        manager: PythonManager {
+            name: manager,
+            version: None,
+        },
+        // Always false here, but derived the same way the other two builders
+        // derive it. The three unavailability signals stay in lockstep because
+        // one list feeds all of them, not because this function remembered to
+        // write `false`.
+        complete: unavailable.is_empty(),
+        capabilities,
+        unavailable,
+        outdated: None,
+        security: None,
+        // No tool ran, so there is no upstream-instability disclaimer to make.
+        // The two `detail` strings carry everything this run has to say.
+        warnings: Vec::new(),
     }
 }
 

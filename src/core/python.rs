@@ -35,21 +35,19 @@
 //! The distinction matters: the blanket allow silenced *everything*, so a type
 //! added later and never wired up looked exactly like one deliberately waiting.
 //!
-//! Two groups remain, and both are the schema being wider than any single
-//! manager rather than the schema having a useless field:
+//! One group remains, and it is the schema being wider than any single manager
+//! rather than the schema having a useless field. `PythonManagerName::Poetry`
+//! and `PythonUnavailableReason::Unsupported` left the list when the Poetry
+//! adapter (#73) landed, and `PythonManagerName::PipTools` left it when #76
+//! taught detection to name a requirements-file project — which is also the
+//! first caller of `Unsupported` for *both* capabilities at once.
 //!
-//! - `PythonManagerName::PipTools` waits on the pip-tools adapter (#76).
-//!   `PythonManagerName::Poetry` and `PythonUnavailableReason::Unsupported` were
-//!   in this list until the Poetry adapter (#73) landed and became the first
-//!   caller of both — `Unsupported` is the fact that adapter exists to report:
-//!   Poetry does not scan for vulnerabilities and no install changes that, which
-//!   is a different fact from `uv audit` being absent.
-//! - `PythonSeverity::{High, Moderate, Low}` and `PythonMarker::{Absent,
-//!   Reported}` are things `uv` does not report. `uv audit` publishes no severity
-//!   at all, so every finding it produces is `Unknown`; `uv tree` attaches an
-//!   environment marker to a dependency *edge* and only under `--universal`, so
-//!   this adapter reports `NotReported`. Removing either group would delete the
-//!   vocabulary that makes those absences legible.
+//! What is left is `PythonSeverity::{High, Moderate, Low}` and
+//! `PythonMarker::{Absent, Reported}`, which are things `uv` does not report.
+//! `uv audit` publishes no severity at all, so every finding it produces is
+//! `Unknown`; `uv tree` attaches an environment marker to a dependency *edge*
+//! and only under `--universal`, so this adapter reports `NotReported`. Removing
+//! either group would delete the vocabulary that makes those absences legible.
 //!
 //! [`docs/python-schema.md`]: https://github.com/llbbl/upkeep-rs/blob/main/docs/python-schema.md
 
@@ -144,9 +142,20 @@ pub struct PythonManager {
 pub enum PythonManagerName {
     Uv,
     Poetry,
-    /// Awaits the pip-tools adapter (#76), which was split out of #73 because
-    /// pip-tools exposes no query interface to normalize at all.
-    #[allow(dead_code)]
+    /// A `requirements.txt` with no sign of a compiler behind it.
+    ///
+    /// Kept apart from [`PythonManagerName::PipTools`] because `manager.name` is
+    /// the field consumers key on, and calling a hand-written requirements file
+    /// "pip-tools" would be a lie told for no gain — the check that separates
+    /// them is one header line.
+    Pip,
+    /// A requirements file compiled by pip-tools: a `requirements.in` sibling, or
+    /// a `pip-compile` header in the `.txt`.
+    ///
+    /// Neither variant has an adapter, and #76 settled that neither will get one:
+    /// pip-tools is a lockfile compiler with no outdated command, no audit
+    /// command, and no query interface to normalize. What ships instead is an
+    /// honest refusal — see `cli::commands::python::build_requirements_output`.
     PipTools,
 }
 
@@ -201,8 +210,10 @@ pub enum PythonUnavailableReason {
     ///
     /// No `uv` gap is this: every one of them — a missing `audit` subcommand, a
     /// `--output-format` without `json` — is fixed by upgrading uv, which is
-    /// `NotInstalled`. Poetry's `security` is the one caller: Poetry ships no
+    /// `NotInstalled`. Poetry's `security` is one caller: Poetry ships no
     /// scanner, and `poetry check` validates the lockfile rather than scanning.
+    /// A requirements-file project is the other, and reports it for *both*
+    /// capabilities: pip and pip-tools expose no query interface at all.
     Unsupported,
 }
 
@@ -532,6 +543,7 @@ impl fmt::Display for PythonManagerName {
         f.write_str(match self {
             PythonManagerName::Uv => "uv",
             PythonManagerName::Poetry => "poetry",
+            PythonManagerName::Pip => "pip",
             PythonManagerName::PipTools => "pip-tools",
         })
     }
@@ -742,6 +754,52 @@ mod tests {
         }
     }
 
+    /// A manager that can answer neither capability.
+    ///
+    /// The requirements-file shape (#76): no tool is run, so `manager.version` is
+    /// `null`, both reports are `null`, and both gaps are `unsupported`. Its two
+    /// details are imported for the same reason the Poetry example's is — the
+    /// documented example has to be the payload, not a paraphrase of one.
+    pub(crate) fn requirements_output() -> PythonOutput {
+        let unavailable = vec![
+            PythonUnavailableCapability {
+                name: PythonCapability::Outdated,
+                reason: PythonUnavailableReason::Unsupported,
+                detail: crate::core::analyzers::python_manager::REQUIREMENTS_OUTDATED_DETAIL
+                    .to_string(),
+            },
+            PythonUnavailableCapability {
+                name: PythonCapability::Security,
+                reason: PythonUnavailableReason::Unsupported,
+                detail: crate::core::analyzers::python_manager::REQUIREMENTS_SECURITY_DETAIL
+                    .to_string(),
+            },
+        ];
+
+        PythonOutput {
+            schema_version: PYTHON_SCHEMA_VERSION,
+            manager: PythonManager {
+                name: PythonManagerName::PipTools,
+                version: None,
+            },
+            complete: false,
+            capabilities: vec![
+                PythonCapabilityCoverage {
+                    name: PythonCapability::Outdated,
+                    measured: false,
+                },
+                PythonCapabilityCoverage {
+                    name: PythonCapability::Security,
+                    measured: false,
+                },
+            ],
+            unavailable,
+            outdated: None,
+            security: None,
+            warnings: Vec::new(),
+        }
+    }
+
     #[test]
     fn documented_json_examples_match_output_contract() {
         let documentation = DocumentedExamples::load("docs/python-schema.md");
@@ -749,6 +807,7 @@ mod tests {
         for (example, output) in [
             ("python", measured_output()),
             ("python-capability-gap", capability_gap_output()),
+            ("python-requirements", requirements_output()),
         ] {
             assert_eq!(
                 documentation.example(example),
@@ -916,6 +975,7 @@ mod tests {
         // These strings are the public contract; a rename is a schema_version
         // bump, so it must not be possible to do one silently.
         for (value, label) in [
+            (serde_json::to_value(PythonManagerName::Pip), "pip"),
             (
                 serde_json::to_value(PythonManagerName::PipTools),
                 "pip_tools",

@@ -480,6 +480,11 @@ fn cli_python_help_matches_under_both_invocation_forms() {
 /// `uv` is stubbed rather than left to the machine. Otherwise, on a runner
 /// without `uv` installed, this passes on the *other* no-manager condition — uv
 /// not on PATH — and stops testing project detection at all.
+///
+/// Carries the same precondition as `a_directory_with_no_project_detects_nothing`
+/// since #76: the requirements walk climbs too, so this also depends on no
+/// `requirements.txt` existing anywhere above the tempdir. A red here on a Linux
+/// runner is worth checking against `/tmp` before hunting in the uv stub.
 #[cfg(unix)]
 #[test]
 fn cli_python_without_a_project_fails_with_an_error_object() {
@@ -1192,4 +1197,146 @@ fn cli_python_a_project_with_both_lockfiles_stays_on_uv() {
         Value::from("uv"),
         "an ambiguous project must keep the behaviour that shipped first: {json}"
     );
+}
+
+/// A project whose only manifest is a requirements file.
+///
+/// `contents` is the `requirements.txt`; passing a `requirements.in` alongside is
+/// what separates `pip_tools` from `pip`, so each caller says which shape it
+/// wants rather than inheriting one.
+fn create_temp_requirements_project(files: &[(&str, &str)]) -> tempfile::TempDir {
+    let temp_dir = tempfile::tempdir().expect("temp dir");
+    for (name, contents) in files {
+        fs::write(temp_dir.path().join(name), contents).expect("write requirements fixture");
+    }
+    temp_dir
+}
+
+/// A requirements-file project reports an honest refusal, and the caller keeps it.
+///
+/// This is #76's whole point. pip and pip-tools expose no outdated command, no
+/// audit command, and no query interface at all, so both capabilities are
+/// `unsupported` and the run exits 1 under the already-documented
+/// every-capability-unavailable rule. The report has to reach stdout *before*
+/// that status, or a failing exit costs the caller the explanation for it — which
+/// is the only thing this run has to give.
+#[test]
+fn cli_python_pip_refuses_with_the_report_still_on_stdout() {
+    let project = create_temp_requirements_project(&[("requirements.txt", "requests==2.32.3\n")]);
+
+    let output = upkeep_cmd()
+        .current_dir(project.path())
+        .args(["python"])
+        .output()
+        .expect("run python");
+
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "a run that measured nothing must not report success; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Manager: pip (unknown version)"),
+        "the manager is named, and no tool ran so there is no version: {stdout}"
+    );
+    assert!(
+        stdout.contains("Coverage: incomplete (0 of 2 capabilities measured)"),
+        "{stdout}"
+    );
+    for capability in ["outdated", "security"] {
+        assert!(
+            stdout.contains(&format!("{capability} not measured (unsupported)")),
+            "{capability} must be reported as structurally unsupported: {stdout}"
+        );
+    }
+    assert!(
+        stdout.contains("uv or Poetry can answer it"),
+        "the refusal has to point somewhere: {stdout}"
+    );
+    assert!(
+        stdout.contains("vulnerability scanner"),
+        "the security gap explains why security specifically is missing: {stdout}"
+    );
+}
+
+/// The concrete improvement over the previous behaviour: a parseable payload.
+///
+/// Before #76 this project hit "no manager detected" and produced a JSON *error
+/// object* carrying no `schema_version` at all. A consumer pinning the version
+/// could not read it. Now it is a real `PythonOutput` whose content is a refusal,
+/// and the three unavailability signals — `measured: false`, an `unavailable[]`
+/// entry, and a `null` report — agree for both capabilities.
+#[test]
+fn cli_python_pip_json_carries_the_schema_version() {
+    for (files, expected_manager) in [
+        (&[("requirements.txt", "requests==2.32.3\n")][..], "pip"),
+        (
+            &[
+                ("requirements.in", "requests\n"),
+                ("requirements.txt", "requests==2.32.3\n"),
+            ][..],
+            "pip_tools",
+        ),
+    ] {
+        let project = create_temp_requirements_project(files);
+
+        let output = upkeep_cmd()
+            .current_dir(project.path())
+            .args(["python", "--json"])
+            .output()
+            .expect("run python");
+
+        assert_eq!(output.status.code(), Some(1));
+
+        let json: Value = serde_json::from_slice(&output.stdout)
+            .expect("the report must still be on stdout alongside the failing status");
+        assert_eq!(
+            json["schema_version"],
+            Value::from(1),
+            "the payload a consumer can pin, where an error object used to be: {json}"
+        );
+        assert_eq!(json["manager"]["name"], Value::from(expected_manager));
+        assert_eq!(
+            json["manager"]["version"],
+            Value::Null,
+            "no tool is run, so there is no version to report: {json}"
+        );
+        assert_eq!(json["complete"], Value::Bool(false));
+        assert_eq!(json["outdated"], Value::Null, "nobody looked");
+        assert_eq!(json["security"], Value::Null, "nobody looked");
+
+        let capabilities = json["capabilities"].as_array().expect("capabilities array");
+        assert_eq!(capabilities.len(), 2);
+        for capability in capabilities {
+            assert_eq!(
+                capability["measured"],
+                Value::Bool(false),
+                "an unmeasured capability stays listed and says so: {capability}"
+            );
+        }
+
+        let unavailable = json["unavailable"].as_array().expect("unavailable array");
+        assert_eq!(unavailable.len(), 2);
+        for gap in unavailable {
+            assert_eq!(
+                gap["reason"],
+                Value::from("unsupported"),
+                "installing something cannot close this gap, so it is not not_installed: {gap}"
+            );
+            assert!(
+                gap["detail"]
+                    .as_str()
+                    .expect("detail")
+                    .contains("uv or Poetry"),
+                "a structural gap must name the tool that can answer instead: {gap}"
+            );
+        }
+        assert_ne!(
+            unavailable[0]["detail"], unavailable[1]["detail"],
+            "each capability explains its own absence: {json}"
+        );
+    }
 }
