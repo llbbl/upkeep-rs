@@ -902,6 +902,7 @@ mod tests {
     use super::*;
     // `UnsafeSummary` is aliased: this module defines its own, and `use
     // super::*` above would otherwise make which one is meant ambiguous.
+    use crate::core::doc_examples::{serialized_value, DocumentedExamples};
     use crate::core::scorers::quality::{
         score_quality, Availability, ClippySummary, DependencyFreshness, MsrvStatus, QualityInputs,
         SecuritySummary, UnsafeSummary as ScoredUnsafe, UnusedSummary,
@@ -912,35 +913,6 @@ mod tests {
         value
             .get(key)
             .unwrap_or_else(|| panic!("missing key {key}"))
-    }
-
-    fn serialized_value<T: Serialize>(output: &T) -> Value {
-        let json = serde_json::to_string(output).expect("serialize output fixture");
-        serde_json::from_str(&json).expect("parse serialized output fixture")
-    }
-
-    fn documented_json_example(documentation: &str, command: &str) -> Value {
-        let marker = format!("<!-- cargo-upkeep-example:{command} -->");
-        assert_eq!(
-            documentation.matches(&marker).count(),
-            1,
-            "{command}: expected exactly one {marker} marker in docs/commands.md"
-        );
-
-        let (_, after_marker) = documentation
-            .split_once(&marker)
-            .unwrap_or_else(|| panic!("{command}: missing {marker} marker in docs/commands.md"));
-        let fenced = after_marker.trim_start();
-        let json_with_fence = fenced.strip_prefix("```json\n").unwrap_or_else(|| {
-            panic!("{command}: marker must be followed by a fenced `json` block")
-        });
-        let (json, _) = json_with_fence
-            .split_once("\n```")
-            .unwrap_or_else(|| panic!("{command}: JSON example is missing its closing code fence"));
-
-        serde_json::from_str(json).unwrap_or_else(|error| {
-            panic!("{command}: documented example is invalid JSON: {error}")
-        })
     }
 
     /// Every analyzer down, scored the way production scores it.
@@ -1252,14 +1224,7 @@ mod tests {
             Value::String("Dependency freshness".into())
         );
 
-        let documentation_path =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/commands.md");
-        let documentation = std::fs::read_to_string(&documentation_path).unwrap_or_else(|error| {
-            panic!(
-                "could not read documented JSON contracts from {}: {error}",
-                documentation_path.display()
-            )
-        });
+        let documentation = DocumentedExamples::load("docs/commands.md");
 
         for (command, expected) in [
             ("detect", detect_value),
@@ -1270,7 +1235,7 @@ mod tests {
             ("unused", unused_value),
             ("unsafe-code", unsafe_value),
         ] {
-            let documented = documented_json_example(&documentation, command);
+            let documented = documentation.example(command);
             assert_eq!(
                 documented, expected,
                 "{command}: docs/commands.md JSON example drifted from its serialized output contract"

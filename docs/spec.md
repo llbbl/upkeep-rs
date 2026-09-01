@@ -101,7 +101,7 @@ The exit status is part of that contract too. `quality` exits nonzero when `scor
 
 ## Testing notes
 
-- The canonical JSON examples in [commands.md](./commands.md) are checked in Rust tests against serialized representative output values.
+- The canonical JSON examples in [commands.md](./commands.md) and [python-schema.md](./python-schema.md) are checked in Rust tests against serialized representative output values.
 - Network-dependent dependency tests skip when crates.io is unavailable unless the environment explicitly requires them.
 - The CLI tests point `UPKEEP_ADVISORY_DB` at a committed fixture database, so they never fetch or lock `~/.cargo/advisory-db`. Analyzer tests open the fixture directly for advisory-warning mapping; yanked mapping and failure behavior use synthetic lookup results and never contact the crates.io index.
 - Full behavior coverage for `unused` and `unsafe-code` requires the matching optional cargo subcommands to be installed.
