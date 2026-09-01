@@ -1,6 +1,6 @@
 ---
 name: upkeep-rs-deps
-version: 0.4.2
+version: 0.4.3
 description: Upgrade Rust dependencies with risk assessment and verification
 allowed-tools: Bash, Read, Grep, Glob, Edit
 ---

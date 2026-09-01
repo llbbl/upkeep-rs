@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.4.3] - 2026-09-01
+
+### Features
+
+- **python:** Add a Poetry backend for cargo upkeep python
 ## [0.4.2] - 2026-09-01
 
 ### Features
