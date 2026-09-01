@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.4.2] - 2026-09-01
+
+### Features
+
+- **python:** Add cargo upkeep python with a uv adapter
 ## [0.4.1] - 2026-09-01
 
 ### Features
