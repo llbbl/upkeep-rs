@@ -40,6 +40,10 @@ test-verbose:
 test-watch:
   cargo watch -x test
 
+# Fast-forward local main from origin before cutting a branch or opening a PR
+sync:
+  bash ./scripts/sync.sh
+
 # Run clippy linter
 lint:
   cargo clippy --locked --all-targets -- -D warnings
