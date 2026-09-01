@@ -5,8 +5,28 @@ the adapter does, so that each manager backend normalizes *into* a shape that
 was designed once, rather than inheriting whichever tool happened to be
 implemented first.
 
-Nothing here is wired to a command yet. The types live in
-`src/core/python.rs` and the JSON examples below are pinned to them by tests.
+`cargo upkeep python` emits it. The types live in `src/core/python.rs`, the
+adapters in `src/core/analyzers/`, and every JSON example below is pinned to the
+serialized types by tests.
+
+## Manager detection
+
+The manager is decided from the project's own files before any tool is run,
+because `uv` and Poetry share `pyproject.toml`. The search walks up from the
+working directory and stops at the first directory holding a `pyproject.toml`,
+`uv.lock`, or `poetry.lock`; that directory decides.
+
+| Evidence in that directory | Manager |
+| --- | --- |
+| `poetry.lock`, a `[tool.poetry]` table, or a `poetry.*` build backend — **and** no `uv` evidence | `poetry` |
+| anything else, including a bare `pyproject.toml` | `uv` |
+
+`uv` evidence is `uv.lock` or a `[tool.uv]` table. A project carrying both is
+genuinely ambiguous, and the tie goes to `uv` because that is the behaviour that
+shipped first; a coin flip there would silently reroute someone's pipeline.
+
+If no directory up the tree holds any of the three files, no manager could be
+detected and the run fails without a report — see [Exit codes](#exit-codes).
 
 ## Why `cargo-upkeep` owns this schema
 
@@ -242,7 +262,7 @@ vulnerabilities, and no install fixes that.
     {
       "name": "security",
       "reason": "unsupported",
-      "detail": "the detected manager reports no vulnerability data; run a dedicated scanner and gate on that instead"
+      "detail": "Poetry has no vulnerability scanner: `poetry check` validates pyproject.toml against the lockfile and is not a scan. No install closes this gap — run a dedicated scanner and gate on that instead."
     }
   ],
   "outdated": {
@@ -270,9 +290,10 @@ is `false` and why `--require-complete` exists.
 
 ## Fields a source may not report
 
-Python dependency metadata is uneven. `uv` can report dependency groups and
-environment markers; `pip list --outdated` reports neither. The schema refuses
-to paper over that.
+Python dependency metadata is uneven. `uv` reports dependency groups and extras;
+`poetry show --format json` carries name, version, latest version, installed
+status, and description, and nothing else — so under Poetry `groups`, `extras`,
+and `marker` are all *not reported*. The schema refuses to paper over that.
 
 Four fields carry the distinction — `groups`, `extras`, `aliases`, and
 `fixed_versions` — and they use the same encoding the payload already uses at

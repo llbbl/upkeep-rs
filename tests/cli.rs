@@ -763,3 +763,433 @@ fn cli_python_reports_findings_when_uv_audit_exits_nonzero() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+// ===== Poetry (#73) =====
+
+/// Must match `core::analyzers::poetry::POETRY_BIN_ENV`.
+///
+/// This crate has no library target, so the constant cannot be imported. A
+/// rename that leaves this behind is caught by
+/// [`cli_python_poetry_reports_security_as_unsupported`], whose stub would stop
+/// being used and let a real Poetry — or no Poetry at all — answer instead.
+const POETRY_BIN_ENV: &str = "UPKEEP_POETRY_BIN";
+
+fn poetry_available() -> bool {
+    Command::new("poetry")
+        .arg("--version")
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+}
+
+fn poetry_fixture(name: &str) -> String {
+    fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("fixtures")
+            .join("poetry")
+            .join(name),
+    )
+    .expect("read poetry fixture")
+}
+
+/// A minimal Poetry project.
+///
+/// `poetry.lock` is written by hand and left empty on purpose: detection only
+/// needs the file to exist, and the stub never reads it. A real `poetry lock`
+/// would reach the network.
+fn create_temp_poetry_project(name: &str) -> tempfile::TempDir {
+    let temp_dir = tempfile::tempdir().expect("temp dir");
+    let root = temp_dir.path();
+
+    fs::write(
+        root.join("pyproject.toml"),
+        format!(
+            "[project]\nname = \"{name}\"\nversion = \"0.1.0\"\n\
+             requires-python = \">=3.10\"\ndependencies = []\n\n\
+             [build-system]\nrequires = [\"poetry-core>=2.0.0\"]\n\
+             build-backend = \"poetry.core.masonry.api\"\n"
+        ),
+    )
+    .expect("write pyproject.toml");
+    fs::write(root.join("poetry.lock"), "").expect("write poetry.lock");
+
+    temp_dir
+}
+
+/// Writes a fake `poetry` that answers with the committed fixtures.
+///
+/// The probe response is Poetry 2.4.2's verbatim wording, so capability
+/// detection resolves exactly as it would against the real binary. The two
+/// listings are the two committed captures, which is what lets the whole pipeline
+/// run with no Poetry installed and no network.
+#[cfg(unix)]
+fn write_poetry_stub(directory: &Path) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+
+    let path = directory.join("poetry-stub");
+    fs::write(
+        &path,
+        format!(
+            r#"#!/bin/sh
+if [ "$1" = "--version" ]; then echo "Poetry (version 2.4.2)"; exit 0; fi
+for arg in "$@"; do
+  if [ "$arg" = "cargo-upkeep-capability-probe" ]; then
+    echo "Error: Invalid output format. Supported formats are: json, text." >&2
+    exit 1
+  fi
+done
+for arg in "$@"; do
+  if [ "$arg" = "--top-level" ]; then
+    cat <<'TOPLEVELJSON'
+{top_level}
+TOPLEVELJSON
+    exit 0
+  fi
+done
+cat <<'ALLJSON'
+{all}
+ALLJSON
+exit 0
+"#,
+            top_level = poetry_fixture("show-latest-top-level.json"),
+            all = poetry_fixture("show-latest.json"),
+        ),
+    )
+    .expect("write poetry stub");
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("chmod poetry stub");
+    path
+}
+
+/// Writes a fake `poetry` predating `poetry show --format`.
+///
+/// The wording is Poetry 2.4.2's verbatim response to an option it does not
+/// have, which is the same message an older Poetry gives for `--format` itself.
+#[cfg(unix)]
+fn write_legacy_poetry_stub(directory: &Path) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+
+    let path = directory.join("poetry-legacy-stub");
+    fs::write(
+        &path,
+        r#"#!/bin/sh
+if [ "$1" = "--version" ]; then echo "Poetry (version 1.0.10)"; exit 0; fi
+echo "" >&2
+echo "The option \"--format\" does not exist" >&2
+exit 1
+"#,
+    )
+    .expect("write legacy poetry stub");
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("chmod poetry stub");
+    path
+}
+
+/// **The reason this adapter exists.** `security` under Poetry is `unsupported`,
+/// never `not_installed`.
+///
+/// The two reasons tell a user opposite things. `not_installed` says "install the
+/// scanner"; there is no scanner to install, because Poetry does not ship one and
+/// `poetry check` validates the lockfile rather than scanning it. Reporting this
+/// gap as `not_installed` would send someone hunting for a tool that does not
+/// exist, and `unsupported` had no caller in the codebase until now.
+#[cfg(unix)]
+#[test]
+fn cli_python_poetry_reports_security_as_unsupported() {
+    let project = create_temp_poetry_project("poetry-unsupported");
+    let stub = write_poetry_stub(project.path());
+
+    let output = upkeep_cmd()
+        .env(POETRY_BIN_ENV, &stub)
+        .current_dir(project.path())
+        .args(["python", "--json"])
+        .output()
+        .expect("run python");
+
+    let json: Value = serde_json::from_slice(&output.stdout).expect("report on stdout");
+
+    assert_eq!(
+        json["manager"]["name"],
+        Value::from("poetry"),
+        "a poetry.lock and a poetry build backend must route to the Poetry adapter, not uv"
+    );
+    assert_eq!(json["manager"]["version"], Value::from("2.4.2"));
+    assert_eq!(
+        json["security"],
+        Value::Null,
+        "nobody looked, and nobody can"
+    );
+
+    let gap = json["unavailable"]
+        .as_array()
+        .expect("unavailable array")
+        .iter()
+        .find(|entry| entry["name"] == "security")
+        .expect("security must be listed as unavailable");
+    assert_eq!(
+        gap["reason"],
+        Value::from("unsupported"),
+        "`not_installed` would tell the user to install a scanner Poetry has never had: {gap}"
+    );
+    assert!(
+        gap["detail"]
+            .as_str()
+            .expect("detail")
+            .contains("poetry check"),
+        "the gap must say what the adjacent command actually does: {gap}"
+    );
+
+    // The three unavailability signals move together.
+    assert_eq!(json["complete"], Value::Bool(false));
+    assert!(json["capabilities"]
+        .as_array()
+        .expect("capabilities")
+        .iter()
+        .any(|capability| capability["name"] == "security"
+            && capability["measured"] == Value::Bool(false)));
+
+    // Outdated *was* measured, so a run that cannot scan is still a real report
+    // and still exits 0. Findings are not failures.
+    assert_ne!(json["outdated"], Value::Null);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "an unsupported capability is not a failure; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// **The other reason this adapter exists.** Poetry's JSON carries no groups, no
+/// extras, and no markers, so all three are `null` / `not_reported` — never `[]`
+/// and never `absent`.
+///
+/// `[]` would claim Poetry reported the field and it was empty. It did not
+/// report it at all. That is the same class of falsehood as an unmeasured
+/// capability defaulting to a clean result (#10, #34), and no other adapter in
+/// this crate reaches all three states at once.
+#[cfg(unix)]
+#[test]
+fn cli_python_poetry_reports_unreported_attributes_as_null() {
+    let project = create_temp_poetry_project("poetry-null-attrs");
+    let stub = write_poetry_stub(project.path());
+
+    let output = upkeep_cmd()
+        .env(POETRY_BIN_ENV, &stub)
+        .current_dir(project.path())
+        .args(["python", "--json"])
+        .output()
+        .expect("run python");
+
+    let json: Value = serde_json::from_slice(&output.stdout).expect("report on stdout");
+    let packages = json["outdated"]["packages"]
+        .as_array()
+        .expect("packages array");
+    assert!(!packages.is_empty(), "fixture premise: there are entries");
+
+    for package in packages {
+        let object = package.as_object().expect("package object");
+        for field in ["groups", "extras"] {
+            assert!(
+                object.contains_key(field),
+                "{field} must stay present, not be omitted: {package}"
+            );
+            assert_eq!(
+                package[field],
+                Value::Null,
+                "{field} must be null; `[]` would claim Poetry looked and found none: {package}"
+            );
+        }
+        assert_eq!(
+            package["marker"],
+            serde_json::json!({ "status": "not_reported" }),
+            "`absent` would claim Poetry reports markers and this one has none: {package}"
+        );
+    }
+
+    // The denominator is every package, not just the ones that are behind — the
+    // reason the adapter runs `--latest` rather than `--outdated`.
+    assert_eq!(json["outdated"]["checked"], Value::from(16));
+    assert_eq!(json["outdated"]["outdated"], Value::from(10));
+
+    // And scope, the one thing Poetry does not report but the adapter can derive,
+    // is filled from the second invocation.
+    let scope_of = |name: &str| {
+        packages
+            .iter()
+            .find(|package| package["name"] == name)
+            .unwrap_or_else(|| panic!("no entry for {name}"))["scope"]
+            .clone()
+    };
+    assert_eq!(scope_of("flask"), Value::from("direct"));
+    assert_eq!(scope_of("werkzeug"), Value::from("transitive"));
+}
+
+/// A Poetry too old for `poetry show --format` reports the gap rather than a
+/// clean run — and `security` stays `unsupported` even then.
+///
+/// The two reasons appearing side by side in one payload is the point. An old
+/// Poetry is the runner's problem and an upgrade fixes it; the missing scanner is
+/// Poetry's, and no upgrade fixes it. A payload that called both `not_installed`
+/// would be telling the user to do one thing about two unrelated facts.
+#[cfg(unix)]
+#[test]
+fn cli_python_poetry_separates_an_old_poetry_from_a_missing_scanner() {
+    let project = create_temp_poetry_project("poetry-legacy");
+    let stub = write_legacy_poetry_stub(project.path());
+
+    let output = upkeep_cmd()
+        .env(POETRY_BIN_ENV, &stub)
+        .current_dir(project.path())
+        .args(["python", "--json"])
+        .output()
+        .expect("run python");
+
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "a run that measured nothing must not report success; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let json: Value = serde_json::from_slice(&output.stdout)
+        .expect("the report must still be on stdout alongside the failing status");
+    assert_eq!(json["manager"]["version"], Value::from("1.0.10"));
+    assert_eq!(json["outdated"], Value::Null, "nobody looked");
+    assert_eq!(json["security"], Value::Null, "nobody looked");
+
+    let reason_for = |name: &str| {
+        json["unavailable"]
+            .as_array()
+            .expect("unavailable array")
+            .iter()
+            .find(|entry| entry["name"] == name)
+            .unwrap_or_else(|| panic!("no gap for {name}"))
+            .clone()
+    };
+
+    let outdated = reason_for("outdated");
+    assert_eq!(
+        outdated["reason"],
+        Value::from("not_installed"),
+        "an old Poetry is the runner's problem, and upgrading fixes it: {outdated}"
+    );
+    assert!(
+        outdated["detail"]
+            .as_str()
+            .expect("detail")
+            .contains("poetry self update"),
+        "a capability gap must name how to close it: {outdated}"
+    );
+
+    let security = reason_for("security");
+    assert_eq!(
+        security["reason"],
+        Value::from("unsupported"),
+        "no Poetry upgrade adds a scanner, so this gap is a different fact: {security}"
+    );
+}
+
+/// The whole pipeline against a real Poetry, when one is installed.
+///
+/// Skips rather than fails on a machine without Poetry, following
+/// `cli_python_command_runs_when_uv_is_available`. The project has no
+/// dependencies and a hand-written empty lockfile, so `poetry show` runs offline
+/// and reports a genuine, measured zero — which is the claim `"outdated": null`
+/// would *not* be making.
+#[test]
+fn cli_python_poetry_runs_when_poetry_is_available() {
+    if !poetry_available() {
+        eprintln!("Skipping test: poetry not installed");
+        return;
+    }
+
+    let project = create_temp_poetry_project("cli-poetry");
+    // An empty `poetry.lock` is enough for detection but not for `poetry show`,
+    // which needs a real lockfile header. This one is written by hand rather than
+    // by `poetry lock`, which would reach the network.
+    fs::write(
+        project.path().join("poetry.lock"),
+        "package = []\n\n[metadata]\nlock-version = \"2.1\"\n\
+         python-versions = \">=3.10\"\ncontent-hash = \"0\"\n",
+    )
+    .expect("write poetry.lock");
+
+    let output = upkeep_cmd()
+        .current_dir(project.path())
+        // `poetry show` creates a virtualenv when the project has none, and with
+        // this set it creates it *inside the project* as `.venv/`. The adapter
+        // passes `POETRY_VIRTUALENVS_CREATE=false` to stop that, and this is the
+        // only place that suppression is observable: forcing in-project
+        // virtualenvs turns "inspecting a project must not modify it" into a
+        // directory that either exists or does not.
+        .env("POETRY_VIRTUALENVS_IN_PROJECT", "true")
+        .args(["python", "--json"])
+        .output()
+        .expect("run python");
+
+    assert!(
+        !project.path().join(".venv").exists(),
+        "reporting on a project must not write into it; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let json: Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|err| {
+        panic!(
+            "parse poetry json ({err}); stdout: {}; stderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )
+    });
+
+    assert_eq!(json["schema_version"], Value::from(1));
+    assert_eq!(json["manager"]["name"], Value::from("poetry"));
+    assert!(
+        json["manager"]["version"].is_string(),
+        "a real Poetry reports its version: {json}"
+    );
+
+    // A measured zero is an object with zero in it, never `null`.
+    assert_eq!(json["outdated"]["outdated"], Value::from(0));
+    assert_eq!(json["outdated"]["packages"], Value::Array(Vec::new()));
+
+    // Poetry can never measure security, so this run is honestly incomplete and
+    // still exits 0 without a gate.
+    assert_eq!(json["security"], Value::Null);
+    assert_eq!(json["complete"], Value::Bool(false));
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "an unsupported capability is not a failure; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// A `uv.lock` beside a `poetry.lock` is ambiguous, and the tie goes to `uv`.
+///
+/// `uv` shipped first, so rerouting an ambiguous project to Poetry would silently
+/// change what an existing pipeline measures. The stub is a Poetry that would
+/// answer perfectly well if it were reached — so this test fails loudly if
+/// detection ever prefers Poetry here, rather than passing for the wrong reason
+/// on a machine with no Poetry installed.
+#[cfg(unix)]
+#[test]
+fn cli_python_a_project_with_both_lockfiles_stays_on_uv() {
+    let project = create_temp_poetry_project("both-lockfiles");
+    fs::write(project.path().join("uv.lock"), "version = 1\n").expect("write uv.lock");
+    let poetry_stub = write_poetry_stub(project.path());
+    let uv_stub = write_legacy_uv_stub(project.path());
+
+    let output = upkeep_cmd()
+        .env(POETRY_BIN_ENV, &poetry_stub)
+        .env(UV_BIN_ENV, &uv_stub)
+        .current_dir(project.path())
+        .args(["python", "--json"])
+        .output()
+        .expect("run python");
+
+    let json: Value = serde_json::from_slice(&output.stdout).expect("report on stdout");
+    assert_eq!(
+        json["manager"]["name"],
+        Value::from("uv"),
+        "an ambiguous project must keep the behaviour that shipped first: {json}"
+    );
+}
