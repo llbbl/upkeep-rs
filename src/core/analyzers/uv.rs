@@ -37,9 +37,10 @@ use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::ffi::OsString;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use tokio::process::Command;
 
+use crate::core::analyzers::python_manager::Capability;
 use crate::core::error::{ErrorCode, Result, UpkeepError};
 use crate::core::pep440;
 use crate::core::python::{
@@ -91,34 +92,16 @@ pub struct Uv {
     version: Option<String>,
 }
 
-/// The outcome of probing one capability.
-pub enum Capability {
-    Available,
-    Unavailable {
-        reason: PythonUnavailableReason,
-        detail: String,
-    },
-}
-
 impl Uv {
-    /// Locates `uv` and the project it should inspect.
+    /// Locates `uv` for an already-detected project root.
     ///
-    /// Both failures here are the documented "no supported Python manager could
-    /// be detected" exit: there is no report to stand on, so this is one of the
-    /// two conditions that fail without any flag being passed.
-    pub async fn detect(start: &Path) -> Result<Self> {
+    /// The root comes from [`crate::core::analyzers::python_manager::detect`],
+    /// which is also what decided this is a `uv` project, so this does not walk
+    /// the filesystem again. A missing binary is the documented "no supported
+    /// Python manager could be detected" exit: there is no report to stand on, so
+    /// it fails without any flag being passed.
+    pub async fn detect(project_root: PathBuf) -> Result<Self> {
         let binary = std::env::var_os(UV_BIN_ENV).unwrap_or_else(|| OsString::from("uv"));
-
-        let project_root = find_project_root(start).ok_or_else(|| {
-            UpkeepError::message(
-                ErrorCode::InvalidData,
-                format!(
-                    "no supported Python manager could be detected: no pyproject.toml or uv.lock \
-                     in {} or any parent directory",
-                    start.display()
-                ),
-            )
-        })?;
 
         let output = Command::new(&binary)
             .arg("--version")
@@ -275,22 +258,6 @@ fn external_failure(command: &str, output: &std::process::Output) -> UpkeepError
             format!("{command} failed: {message}")
         },
     )
-}
-
-/// Walks up from `start` looking for a project `uv` could act on.
-///
-/// `uv` performs the same walk itself, but the answer is needed *before* uv runs:
-/// "there is no Python project here" is a different report from "uv is not
-/// installed", and both are the no-report exit rather than an empty result.
-fn find_project_root(start: &Path) -> Option<PathBuf> {
-    let mut current = Some(start);
-    while let Some(directory) = current {
-        if directory.join("pyproject.toml").is_file() || directory.join("uv.lock").is_file() {
-            return Some(directory.to_path_buf());
-        }
-        current = directory.parent();
-    }
-    None
 }
 
 /// Extracts the version from `uv --version` output.
@@ -1468,17 +1435,5 @@ mod tests {
         .expect("parse audit");
         let (security, _) = normalize_audit(&audit, &scopes);
         assert_eq!(security.findings[0].package, "zope-interface");
-    }
-
-    #[test]
-    fn project_root_is_found_by_walking_up() {
-        let temp = tempfile::tempdir().expect("temp dir");
-        let nested = temp.path().join("src").join("deep");
-        std::fs::create_dir_all(&nested).expect("create nested");
-
-        assert_eq!(find_project_root(&nested), None);
-
-        std::fs::write(temp.path().join("pyproject.toml"), "[project]\n").expect("write manifest");
-        assert_eq!(find_project_root(&nested).as_deref(), Some(temp.path()));
     }
 }

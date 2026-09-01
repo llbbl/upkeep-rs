@@ -494,34 +494,66 @@ cargo install cargo-geiger
 
 ## python
 
-Report outdated and vulnerable **Python** dependencies, normalized from `uv`.
+Report outdated and vulnerable **Python** dependencies, normalized from `uv` or
+Poetry.
 
 ```bash
 cargo upkeep python --json
 ```
 
-The payload, every field's meaning, the classification rules, and the exit
-contract live in [python-schema.md](./python-schema.md) — that page is the
-contract, and this section only says what is different from the Rust commands.
+The payload, every field's meaning, the classification rules, the manager
+detection rule, and the exit contract live in
+[python-schema.md](./python-schema.md) — that page is the contract, and this
+section only says what is different from the Rust commands.
 
-Three things are worth knowing before you gate on it.
+Four things are worth knowing before you gate on it.
+
+**The manager is detected from the project, not from a flag.** A `poetry.lock`, a
+`[tool.poetry]` table, or a `poetry.*` build backend selects Poetry; everything
+else, including a bare `pyproject.toml`, selects `uv`. A project configured for
+both is ambiguous and stays on `uv`. See
+[Manager detection](./python-schema.md#manager-detection).
 
 **Capabilities are probed, not inferred.** `uv` gained `audit` around 0.10.10,
 its JSON output in 0.11.15, and `uv tree --format json` appears in no release
-note at all, so this command asks the installed `uv` what it accepts rather than
+note at all; `poetry show --format` is likewise absent from older Poetry
+releases. So this command asks the installed tool what it accepts rather than
 reading its version number. A capability that cannot answer becomes an
 `unavailable[]` entry with a `null` report and an upgrade hint. It never becomes
 a clean result.
 
-**`uv audit` publishes no severity.** Every finding is therefore `unknown`, and
-an `unknown` severity satisfies every `--fail-on-vulnerability` threshold — so
-`--fail-on-vulnerability critical` currently fails on any finding at all. That is
-deliberate: a severity that was never established cannot be shown to be below the
-bar. Gate on the parsed `summary.unknown` bucket if you want a different rule.
+**Neither manager grades its advisories, and Poetry has none to grade.** Every
+`uv audit` finding is `unknown`, and an `unknown` severity satisfies every
+`--fail-on-vulnerability` threshold — so `--fail-on-vulnerability critical`
+currently fails on any finding at all. That is deliberate: a severity that was
+never established cannot be shown to be below the bar. Gate on the parsed
+`summary.unknown` bucket if you want a different rule.
 
-**Only read-only `uv` invocations are used** — `uv tree --outdated --frozen` and
-`uv audit --frozen`. Nothing here locks, syncs, or edits the project, and a
-project with no `uv.lock` fails with uv's own message rather than creating one.
+Poetry ships no scanner at all, so under Poetry `security` is `unsupported`
+rather than `not_installed` — no install closes that gap, and a Poetry run is
+therefore never `complete`.
+
+That has a consequence worth stating outright: **`--fail-on-vulnerability` can
+never fail under Poetry.** There are no findings for it to match, so it exits 0
+on every Poetry project no matter which threshold you pass. It is not a security
+gate there. The gate that catches the gap is `--require-complete=security`, which
+exits non-zero precisely because the scan did not happen:
+
+```bash
+cargo upkeep python --require-complete=outdated,security
+```
+
+Name both capabilities rather than passing the bare `--require-complete`, whose
+meaning grows as capabilities are added — but do not narrow it to
+`--require-complete=outdated` on a Poetry project, because that is exactly the
+combination that goes green with nothing scanned.
+
+**Only read-only invocations are used** — `uv tree --outdated --frozen`,
+`uv audit --frozen`, and `poetry show --latest [--top-level] --format json`.
+Nothing here locks, syncs, or edits the project; a project with no `uv.lock` or
+`poetry.lock` fails with the manager's own message rather than creating one, and
+Poetry is run with virtualenv creation suppressed so that inspecting a project
+never writes a `.venv/` into it.
 
 ```bash
 # Coverage gate. Name the capabilities in CI: the bare form means "every

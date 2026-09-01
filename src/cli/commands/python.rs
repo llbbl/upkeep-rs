@@ -14,7 +14,9 @@
 //! asks for one with `--require-complete` or `--fail-on-vulnerability`.
 
 use crate::cli::{CapabilityArg, PythonArgs, ThresholdArg};
-use crate::core::analyzers::uv::{Capability, ScopeIndex, Uv};
+use crate::core::analyzers::poetry::{Poetry, SECURITY_UNSUPPORTED_DETAIL};
+use crate::core::analyzers::python_manager::{self, Capability};
+use crate::core::analyzers::uv::{ScopeIndex, Uv};
 use crate::core::error::{ErrorCode, Result, UpkeepError};
 use crate::core::output::print_json;
 use crate::core::python::{
@@ -22,16 +24,27 @@ use crate::core::python::{
     PythonSeverity, PythonUnavailableCapability, PythonUnavailableReason, PYTHON_SCHEMA_VERSION,
 };
 
-/// The disclaimer every payload carries.
+/// The disclaimer every `uv` payload carries.
 ///
 /// `uv tree --format json` and `uv audit --output-format json` both print an
 /// experimental-output warning to stderr and both self-declare
 /// `"schema": {"version": "preview"}`. Absorbing that here is the point of owning
 /// a schema: the instability is a normalization problem for this adapter, not
 /// something a caller's CI gate should have to see on stderr and interpret.
-const UPSTREAM_DISCLAIMER: &str =
+const UV_DISCLAIMER: &str =
     "uv documents its own JSON output as unstable; this report is normalized into cargo-upkeep \
      schema_version 1";
+
+/// The same disclaimer for Poetry, whose instability is of a different kind.
+///
+/// Poetry does not self-declare its `show --format json` output as preview, but
+/// it does not publish a stability guarantee for it either — `docs/python-schema.md`
+/// says as much in "Why cargo-upkeep owns this schema". An absent promise is not
+/// a promise, so the caller is told the same thing: what they are reading is our
+/// contract, not Poetry's.
+const POETRY_DISCLAIMER: &str =
+    "Poetry publishes no stability guarantee for `poetry show --format json`; this report is \
+     normalized into cargo-upkeep schema_version 1";
 
 pub async fn run(json: bool, args: PythonArgs) -> Result<()> {
     let policy = ExitPolicy::from(&args);
@@ -44,8 +57,30 @@ pub async fn run(json: bool, args: PythonArgs) -> Result<()> {
     // failures. It is an error rather than an empty payload because there is
     // nothing for `complete` to qualify, and it deliberately carries no
     // `schema_version`: this path emits an error object, not a `PythonOutput`.
-    let uv = Uv::detect(&working_directory).await?;
-    let output = build_output(&uv).await;
+    //
+    // Detection decides the *manager* from the project's own markers before any
+    // tool runs. Poetry and uv share `pyproject.toml`, so pointing uv at a Poetry
+    // project would report a missing `uv.lock` instead of a report.
+    let project = python_manager::detect(&working_directory).ok_or_else(|| {
+        UpkeepError::message(
+            ErrorCode::InvalidData,
+            format!(
+                "no supported Python manager could be detected: no pyproject.toml, uv.lock, or \
+                 poetry.lock in {} or any parent directory",
+                working_directory.display()
+            ),
+        )
+    })?;
+
+    let output = match project.manager {
+        PythonManagerName::Poetry => {
+            build_poetry_output(&Poetry::detect(project.root).await?).await
+        }
+        // pip-tools has no adapter (#76), so it is never a detection outcome.
+        PythonManagerName::Uv | PythonManagerName::PipTools => {
+            build_uv_output(&Uv::detect(project.root).await?).await
+        }
+    };
 
     // The report is printed before the policy runs, so a failing exit status never
     // costs the caller the analysis that explains it. `quality` establishes the
@@ -70,8 +105,8 @@ fn emit_output(json: bool, output: &PythonOutput) -> Result<()> {
 /// `uv audit` borrows direct-versus-transitive scope from the dependency graph
 /// `uv tree` produces, and uv itself locks its cache across concurrent
 /// invocations, so there is nothing to win by overlapping them.
-async fn build_output(uv: &Uv) -> PythonOutput {
-    let mut warnings = vec![UPSTREAM_DISCLAIMER.to_string()];
+async fn build_uv_output(uv: &Uv) -> PythonOutput {
+    let mut warnings = vec![UV_DISCLAIMER.to_string()];
     let mut unavailable = Vec::new();
 
     let (outdated, scopes) = match uv.probe_outdated().await {
@@ -126,6 +161,78 @@ async fn build_output(uv: &Uv) -> PythonOutput {
         unavailable,
         outdated,
         security,
+        warnings,
+    }
+}
+
+/// Probes the one capability Poetry has, and records the one it structurally
+/// lacks.
+///
+/// The shape differs from [`build_uv_output`] in exactly one way, and it is the
+/// reason this adapter was worth building: `security` is not probed at all. There
+/// is nothing to probe. Poetry ships no scanner, `poetry check` validates
+/// `pyproject.toml` against the lockfile rather than scanning it, and no install
+/// changes that — so the gap is [`PythonUnavailableReason::Unsupported`] and not
+/// `NotInstalled`. Telling a user to install something here would send them
+/// looking for a tool that does not exist.
+async fn build_poetry_output(poetry: &Poetry) -> PythonOutput {
+    // `--fail-on-vulnerability` can only fail on findings, and Poetry produces
+    // none because it has no scanner. So the flag is not merely quiet here — it
+    // is structurally incapable of failing, and unlike uv's transient gaps no
+    // upgrade closes it. A pipeline that adds a Poetry project to an existing
+    // matrix would go green and stay green with nothing scanned, so the payload
+    // says so rather than leaving the user to infer it from `security: null`.
+    let mut warnings = vec![
+        POETRY_DISCLAIMER.to_string(),
+        "Poetry cannot measure `security`, so `--fail-on-vulnerability` can never fail on this \
+         project and is not a security gate here. Gate on `--require-complete=security` to catch \
+         the gap, and run a dedicated scanner for the finding itself."
+            .to_string(),
+    ];
+    let mut unavailable = vec![gap(
+        PythonCapability::Security,
+        PythonUnavailableReason::Unsupported,
+        SECURITY_UNSUPPORTED_DETAIL.to_string(),
+    )];
+
+    let outdated = match poetry.probe_outdated().await {
+        Capability::Available => match poetry.outdated().await {
+            Ok((report, notes)) => {
+                warnings.extend(notes);
+                Some(report)
+            }
+            Err(err) => {
+                unavailable.push(gap(
+                    PythonCapability::Outdated,
+                    PythonUnavailableReason::Failed,
+                    err.to_string(),
+                ));
+                None
+            }
+        },
+        Capability::Unavailable { reason, detail } => {
+            unavailable.push(gap(PythonCapability::Outdated, reason, detail));
+            None
+        }
+    };
+
+    let capabilities = coverage(&unavailable);
+
+    PythonOutput {
+        schema_version: PYTHON_SCHEMA_VERSION,
+        manager: PythonManager {
+            name: PythonManagerName::Poetry,
+            version: poetry.version().map(str::to_string),
+        },
+        // Never true under Poetry. `security` is unmeasurable here, so a Poetry
+        // run is honestly incomplete and `--require-complete` in its bare form
+        // will always fail — which is why `docs/python-schema.md` tells CI to name
+        // the capabilities it actually needs.
+        complete: unavailable.is_empty(),
+        capabilities,
+        unavailable,
+        outdated,
+        security: None,
         warnings,
     }
 }

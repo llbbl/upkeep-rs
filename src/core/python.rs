@@ -38,9 +38,10 @@
 //! Two groups remain, and both are the schema being wider than any single
 //! manager rather than the schema having a useless field:
 //!
-//! - `PythonManagerName::{Poetry, PipTools}` and
-//!   `PythonUnavailableReason::Unsupported` wait on the Poetry and pip-tools
-//!   adapters (#73). `Unsupported` is the reason those adapters exist to report:
+//! - `PythonManagerName::PipTools` waits on the pip-tools adapter (#76).
+//!   `PythonManagerName::Poetry` and `PythonUnavailableReason::Unsupported` were
+//!   in this list until the Poetry adapter (#73) landed and became the first
+//!   caller of both — `Unsupported` is the fact that adapter exists to report:
 //!   Poetry does not scan for vulnerabilities and no install changes that, which
 //!   is a different fact from `uv audit` being absent.
 //! - `PythonSeverity::{High, Moderate, Low}` and `PythonMarker::{Absent,
@@ -142,10 +143,9 @@ pub struct PythonManager {
 #[serde(rename_all = "snake_case")]
 pub enum PythonManagerName {
     Uv,
-    /// Awaits the Poetry adapter (#73).
-    #[allow(dead_code)]
     Poetry,
-    /// Awaits the pip-tools adapter (#73).
+    /// Awaits the pip-tools adapter (#76), which was split out of #73 because
+    /// pip-tools exposes no query interface to normalize at all.
     #[allow(dead_code)]
     PipTools,
 }
@@ -201,8 +201,8 @@ pub enum PythonUnavailableReason {
     ///
     /// No `uv` gap is this: every one of them — a missing `audit` subcommand, a
     /// `--output-format` without `json` — is fixed by upgrading uv, which is
-    /// `NotInstalled`. This is Poetry's case, and it lands with #73.
-    #[allow(dead_code)]
+    /// `NotInstalled`. Poetry's `security` is the one caller: Poetry ships no
+    /// scanner, and `poetry check` validates the lockfile rather than scanning.
     Unsupported,
 }
 
@@ -696,6 +696,11 @@ mod tests {
     }
 
     /// A manager that cannot answer one capability at all.
+    ///
+    /// This stopped being hypothetical when the Poetry adapter landed (#73), so
+    /// the `detail` is imported from that adapter rather than written out here.
+    /// The documented example claims to be a Poetry payload; sourcing the string
+    /// from the adapter is what stops it from becoming a paraphrase of one.
     pub(crate) fn capability_gap_output() -> PythonOutput {
         PythonOutput {
             schema_version: PYTHON_SCHEMA_VERSION,
@@ -717,9 +722,7 @@ mod tests {
             unavailable: vec![PythonUnavailableCapability {
                 name: PythonCapability::Security,
                 reason: PythonUnavailableReason::Unsupported,
-                detail: "the detected manager reports no vulnerability data; run a dedicated \
-                         scanner and gate on that instead"
-                    .to_string(),
+                detail: crate::core::analyzers::poetry::SECURITY_UNSUPPORTED_DETAIL.to_string(),
             }],
             outdated: Some(PythonOutdatedReport {
                 checked: 4,
