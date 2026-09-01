@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.4.1] - 2026-09-01
+
+### Features
+
+- **quality:** Add --require-complete and fail when nothing was measured
 ## [0.4.0] - 2026-08-31
 
 ### Features
