@@ -18,14 +18,65 @@ working directory and stops at the first directory holding a `pyproject.toml`,
 
 | Evidence in that directory | Manager |
 | --- | --- |
-| `poetry.lock`, a `[tool.poetry]` table, or a `poetry.*` build backend — **and** no `uv` evidence | `poetry` |
+| `poetry.lock` or a `[tool.poetry]` table — **and** no `uv` evidence | `poetry` |
 | anything else, including a bare `pyproject.toml` | `uv` |
 
 `uv` evidence is `uv.lock` or a `[tool.uv]` table. A project carrying both is
 genuinely ambiguous, and the tie goes to `uv` because that is the behaviour that
 shipped first; a coin flip there would silently reroute someone's pipeline.
 
-If no directory up the tree holds any of the three files, no manager could be
+A `poetry.*` build backend is deliberately *not* Poetry evidence. It says how the
+project is built, not who manages its dependencies, and a PEP 621 project can
+build with `poetry-core` while `uv` owns its dependencies.
+
+### The requirements-file fallback
+
+Only when that walk reaches the filesystem root having found nothing does a
+**second** walk run, looking for `requirements.txt` or `requirements.in`.
+
+| Evidence in that directory | Manager |
+| --- | --- |
+| a `requirements.in`, or a comment line naming `pip-compile` ahead of any content in `requirements.txt` | `pip_tools` |
+| a `requirements.txt` with neither | `pip` |
+
+The ordering is the whole design, not an implementation detail. Both walks climb,
+so if the requirements files were simply added to the first walk's marker set
+they would be the *innermost* marker in a repo that keeps a `requirements.txt` in
+a subdirectory — a CI pin, a Docker export, a leftover — and that project would
+start reporting `pip_tools` for anyone who ran the command from that
+subdirectory. Running the requirements walk second, and only as a last resort,
+leaves every pre-existing detection outcome unchanged.
+
+The two names are kept apart because `manager.name` is the field consumers key
+on, and calling a hand-written `requirements.txt` "pip-tools" would be a lie told
+for no gain — the check that separates them is one header line. `manager.version`
+is `null` for both: no tool is run, so there is no version to report.
+
+The second-walk ordering has a cost worth stating plainly, because it inverts
+the innermost-wins rule above: a requirements-file project nested inside a
+repo that has a `pyproject.toml` at its root reports the **outer** project, not
+the local `requirements.txt`. The first walk answers, so the second never runs.
+Splitting a monorepo's Python subprojects across managers is the case this gets
+wrong, and it is the deliberate price of leaving every pre-existing detection
+outcome untouched.
+
+Both walks climb to the filesystem root, so a stray `requirements.txt` in a home
+directory makes an unrelated working directory report a `pip` project rather than
+no project at all. Both outcomes exit 1 and neither invents data — the refusal is
+the same either way — but the manager name is then describing a file the user did
+not mean as a project. This is the same exposure the `pyproject.toml` walk has
+always had; requirements files are simply scattered more casually.
+
+Neither has an adapter, and neither will get one. pip-tools is a lockfile
+compiler and pip is an installer; neither exposes an outdated command, an audit
+command, or any query interface at all, so there is no tool output to normalize.
+Both capabilities are reported `unsupported` with a `detail` that names the
+limitation and points at `uv` or Poetry. See
+[the requirements-file example](#a-manager-that-can-answer-nothing) below, and
+note the consequence in [Exit codes](#exit-codes): this is the first manager that
+*always* exits nonzero.
+
+If no directory up the tree holds any of these files, no manager could be
 detected and the run fails without a report — see [Exit codes](#exit-codes).
 
 ## Why `cargo-upkeep` owns this schema
@@ -288,6 +339,57 @@ Read that payload carefully: `"outdated": 0` is a real, measured zero, and
 clean has drawn a conclusion the data does not support, which is why `complete`
 is `false` and why `--require-complete` exists.
 
+### A manager that can answer nothing
+
+A requirements-file project is the extreme of that shape: *both* capabilities are
+`unsupported`, so there is no report at all to qualify and the run exits 1 with
+no flag. The payload is still the deliverable. Before this existed the same
+project produced a JSON *error object* carrying no `schema_version`, which a
+consumer pinning the version could not read.
+
+<!-- cargo-upkeep-example:python-requirements -->
+```json
+{
+  "schema_version": 1,
+  "manager": {
+    "name": "pip_tools",
+    "version": null
+  },
+  "complete": false,
+  "capabilities": [
+    {
+      "name": "outdated",
+      "measured": false
+    },
+    {
+      "name": "security",
+      "measured": false
+    }
+  ],
+  "unavailable": [
+    {
+      "name": "outdated",
+      "reason": "unsupported",
+      "detail": "Neither pip nor pip-tools reports newer versions for a requirements file: `pip list --outdated` describes an installed environment rather than the pinned requirements, and `pip-compile --upgrade` re-resolves the file rather than reporting on it. No install closes this gap — uv or Poetry can answer it for a project they manage."
+    },
+    {
+      "name": "security",
+      "reason": "unsupported",
+      "detail": "Neither pip nor pip-tools ships a vulnerability scanner, and `uv audit` requires a pyproject.toml rather than a requirements file, so there is nothing here to scan with. No install closes this gap — uv or Poetry can answer it for a project they manage, and a dedicated scanner can answer it in place."
+    }
+  ],
+  "outdated": null,
+  "security": null,
+  "warnings": []
+}
+```
+
+The two `detail` strings are written separately rather than repeated, because a
+consumer reading only the `security` gap has to learn why *security* is missing:
+that is a different fact from the outdated one, and it is the one that decides
+whether a pipeline needs a scanner bolted on beside this command. A `pip` project
+emits the same payload with `"name": "pip"`.
+
 ## Fields a source may not report
 
 Python dependency metadata is uneven. `uv` reports dependency groups and extras;
@@ -507,6 +609,13 @@ Two conditions fail without any flag, because there is no report to stand on:
 - A manager was detected but every capability is unavailable — `complete` is
   false and both reports are `null`. There is nothing here for `complete` to
   qualify, exactly as `quality` treats `score: null`.
+
+`pip` and `pip_tools` meet that second condition on every run, by construction:
+neither can answer either capability, so a requirements-file project *always*
+exits 1. That is the existing rule reached by a new route, not an exception
+carved for these managers — and no flag suppresses it. What such a run gives a
+caller is the payload on stdout saying why, which is the same thing a passing run
+gives them.
 
 The report, when one exists, is written to stdout in full *before* the process
 exits nonzero. A failing status never costs the caller the output that explains
