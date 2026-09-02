@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.4.4] - 2026-09-02
+
+### Features
+
+- **python:** Detect pip and pip-tools projects and refuse to guess
 ## [0.4.3] - 2026-09-01
 
 ### Features
