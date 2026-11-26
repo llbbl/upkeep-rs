@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.4.5] - 2026-11-26
+
+### Security
+
+- **deps:** Bump rustls from 0.23.43 to 0.23.46 ([#79](https://github.com/llbbl/upkeep-rs/pull/79))
 ## [0.4.4] - 2026-09-02
 
 ### Features
